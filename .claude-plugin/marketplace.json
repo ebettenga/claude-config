@@ -1,0 +1,12 @@
+{
+  "name": "ethan-claude",
+  "owner": { "name": "Ethan Bettenga" },
+  "description": "Ethan's own Claude Code plugins and mods.",
+  "plugins": [
+    {
+      "name": "filedeck",
+      "source": "./plugins/filedeck",
+      "description": "A modern file pane: what Claude touched, a badge-styled file tree with inline diffs, and a git panel to stage, commit and push."
+    }
+  ]
+}

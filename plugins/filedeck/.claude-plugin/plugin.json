@@ -1,0 +1,6 @@
+{
+  "name": "filedeck",
+  "version": "0.1.0",
+  "description": "A modern file pane: what Claude touched, a badge-styled file tree, and a git panel to stage, commit and push.",
+  "types": "./types/index.d.ts"
+}

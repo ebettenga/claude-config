@@ -1,0 +1,91 @@
+{
+  "enabledPlugins": {
+    "savvy-progress@claude-kit": true,
+    "skins@hellosverre-mods": true,
+    "filetree@claude-code-filetree": false,
+    "cache-tax@claude-code-mods": true,
+    "blast-radius@claude-code-playground-mods": true,
+    "replay-theater@claude-code-playground-mods": true,
+    "reflect-mod@claude-reflect-marketplace": true,
+    "terminal-browser@terminal-browser": true,
+    "cc-plugin-you-should-know@builtin": true,
+    "prismantis@prismantis": false,
+    "filedeck@ethan-claude": true
+  },
+  "extraKnownMarketplaces": {
+    "claude-kit": {
+      "source": {
+        "source": "github",
+        "repo": "johnnyvizz/claude-kit"
+      }
+    },
+    "hellosverre-mods": {
+      "source": {
+        "source": "github",
+        "repo": "hellosverre/claude-skins"
+      }
+    },
+    "claude-code-filetree": {
+      "source": {
+        "source": "github",
+        "repo": "data-goblin/claude-code-filetree"
+      }
+    },
+    "claude-code-mods": {
+      "source": {
+        "source": "github",
+        "repo": "karanb192/claude-code-mods"
+      }
+    },
+    "claude-reflect-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "bayramannakov/claude-reflect"
+      }
+    },
+    "terminal-browser": {
+      "source": {
+        "source": "github",
+        "repo": "zenbu-labs/terminal-browser"
+      }
+    },
+    "claude-code-playground-mods": {
+      "source": {
+        "source": "directory",
+        "path": "~/.claude/mod-sources/claude-code-playground/claude-code/mods"
+      }
+    },
+    "prismantis": {
+      "source": {
+        "source": "github",
+        "repo": "NahumLitvin/prismantis"
+      }
+    },
+    "ethan-claude": {
+      "source": {
+        "source": "directory",
+        "path": "{{REPO}}"
+      }
+    }
+  },
+  "pluginConfigs": {
+    "prismantis@prismantis": {
+      "options": {
+        "theme": "solarized-dark",
+        "tableStyle": "grid",
+        "taskStyle": "progress",
+        "toolStyle": "tree-bold",
+        "toolOutput": "quiet",
+        "diffStyle": "bar",
+        "pieStyle": "round"
+      }
+    },
+    "filetree@claude-code-filetree": {
+      "options": {
+        "palette": "fg=#e4e4e7 bg=#0f1117 accent=#7c8cff muted=#6b7280 urgent=#f87171 selection=#1e2235 hover=#171a26 added=#4ade80 modified=#fbbf24 renamed=#c084fc add=#4ade80 del=#f87171"
+      }
+    }
+  },
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true
+}
