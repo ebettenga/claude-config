@@ -5,7 +5,7 @@ My Claude Code setup: settings, skills, plugin marketplaces, and my own plugins.
 ## Set up a new computer
 
 ```bash
-git clone git@github.com:<owner>/claude-config.git ~/Documents/claude-config
+git clone https://github.com/ebettenga/claude-config.git ~/Documents/claude-config
 ~/Documents/claude-config/install.sh
 ```
 
