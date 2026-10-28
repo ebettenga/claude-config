@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, FsEntry, Register, RenderChildren } from 'claude-code'
 
 import type { GitFile, GitSnap, PreviewMode, SelectionSite, Tab, Touch } from '../types'
+import { BY_EXTENSION, BY_FILE_NAME, BY_FOLDER_NAME, ICON_FILE, ICON_FOLDER, SVG } from './icons'
 
 const PANE = 'filedeck'
 const MAX_ROWS = 400
@@ -85,6 +86,21 @@ const BADGES: Array<[RegExp, Badge]> = [
   [/^(license|licence)/i, { label: 'TXT', color: '#9a9a9a' }],
   [/\.txt$/i, { label: 'TXT', color: '#9a9a9a' }],
 ]
+
+// Material Icon Theme's icon for a file: by its whole name, then its longest
+// known extension (test.ts before ts), then the plain file.
+function fileIconOf(name: string): string {
+  const lower = name.toLowerCase()
+  const byName = BY_FILE_NAME[lower]
+  if (byName) return byName
+  const parts = lower.split('.')
+  for (let i = 1; i < parts.length; i++) {
+    const byExt = BY_EXTENSION[parts.slice(i).join('.')]
+    if (byExt) return byExt
+  }
+  return ICON_FILE
+}
+const folderIconOf = (name: string, isOpen: boolean) => (BY_FOLDER_NAME[name.toLowerCase()] ?? ICON_FOLDER)[isOpen ? 1 : 0]
 
 function badgeOf(name: string): Badge {
   for (const [re, b] of BADGES) if (re.test(name)) return b
@@ -382,7 +398,7 @@ export const register: Register = on => {
     const els = $.ui.resolve(e)
     const { Box, Text, Button, Code, Markdown } = els
     const Input = 'Input' in els ? els.Input : undefined
-    const Svg = 'Svg' in els ? els.Svg : undefined
+    const Svg = e.surface !== 'terminal' && 'Svg' in els ? els.Svg : undefined
     const isDesktop = e.surface !== 'terminal'
     const width = Math.max(30, e.props.bodyColumns ?? 60)
     const [g, list, open, hidden, sizes, current, working, message, q, view, selected, mode, step, following, site] = await Promise.all([
@@ -439,6 +455,8 @@ export const register: Register = on => {
         : <Text color={color} bold>{text}</Text>
     const badge = (name: string) => {
       const b = badgeOf(name)
+      const svg = SVG[fileIconOf(name)]
+      if (Svg && svg) return <Box width={2} flexShrink={0} justifyContent="center" alignItems="center"><Svg source={svg} alt={b.label} width={18} height={18} /></Box>
       return isDesktop
         ? (
             <Box width={5} flexShrink={0} justifyContent="center" alignItems="center" backgroundColor={tint(b.color, '26')}>
@@ -532,7 +550,7 @@ export const register: Register = on => {
         <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1} minWidth={0} overflow="hidden">
           {o.depth ? <Box width={o.depth * 2} flexShrink={0} /> : null}
           <Box width={1} flexShrink={0} justifyContent="center">{o.isDir ? caret(Boolean(o.isOpen)) : spacer(1)}</Box>
-          <Box flexShrink={0}>{o.isDir ? (Svg ? icon(ICON.folder, dimDir ? C.folderDim : C.folder, 18, 'folder') : <Text color={C.folder}>{o.isOpen ? '▣' : '▢'}</Text>) : badge(o.name)}</Box>
+          <Box flexShrink={0}>{o.isDir ? (Svg ? <Box width={2} justifyContent="center" alignItems="center"><Svg source={SVG[folderIconOf(o.name, Boolean(o.isOpen))] ?? stroke(ICON.folder, C.folder)} alt="folder" width={18} height={18} /></Box> : <Text color={C.folder}>{o.isOpen ? '▣' : '▢'}</Text>) : badge(o.name)}</Box>
           <Box flexShrink={1} minWidth={0} overflow="hidden">
             <Button key={`f:${o.abs}`} plain onPress={o.onPress}>
               <Text color={nameColor} weight={act || selected === o.abs ? 'semibold' : 'regular'} dimColor={dimDir} wrap="truncate-end">{o.name}</Text>

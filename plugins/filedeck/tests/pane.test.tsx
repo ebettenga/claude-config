@@ -53,7 +53,8 @@ test('files tab: badges, folder change count, Claude touched', async ($, on) => 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /1 changed/ }))?.text).toBe('1 changed')
-    expect(await ui.find({ type: 'Text', text: /PDF/ })).toBeTruthy()
+    if (surface === 'terminal') expect(await ui.find({ type: 'Text', text: /PDF/ })).toBeTruthy()
+    else expect(String((await ui.findAll({ type: 'Svg' })).map(x => x.props?.alt).join(' '))).toMatch(/PDF/)
     expect(await ui.find({ type: 'Text', text: /clean|changed/ })).toBeTruthy()
     expect((await ui.find({ type: 'Text', text: /1 file$/i }))?.text).toMatch(/1 FILE/)
     if (surface === 'desktop') expect((await ui.findAll({ type: 'Svg' })).length).toBeGreaterThan(2)
