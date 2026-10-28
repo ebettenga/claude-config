@@ -1,0 +1,678 @@
+#!/usr/bin/env python3
+"""Manage claude-as profiles and what each one has installed.
+
+claude-as hands every command that manages rather than launches to this file.
+Profiles are profiles/<name>.env in the repo (account names only); each one's
+Claude config folder is ~/.claude-profiles/<name>/claude. Changes to plugins
+and MCP servers go through the claude CLI with CLAUDE_CONFIG_DIR pointed at
+that folder, so Claude Code stays the one that writes its own files.
+"""
+
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+
+REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+PROFILES = os.path.join(REPO, 'profiles')
+TEMPLATE = os.path.join(PROFILES, '_template.env')
+DATA_ROOT = os.environ.get('CLAUDE_AS_HOME') or os.path.expanduser('~/.claude-profiles')
+HOME = os.path.expanduser('~')
+
+# The account fields a profile holds, in file order: (key, what it is, allowed values).
+FIELDS = [
+    ('PROFILE_DESC', 'One line shown in lists: whose accounts these are', None),
+    ('GH_USER', 'GitHub user gh is signed in as (gh auth status)', None),
+    ('SSH_KEY', 'SSH key that user pushes with, e.g. ~/.ssh/id_ed25519', None),
+    ('GIT_NAME', 'git author name', None),
+    ('GIT_EMAIL', 'git author email', None),
+    ('GOOGLE_ACCOUNT', 'Alias of the Google account in the google-drive MCP token store', None),
+    ('GCLOUD_CONFIG_DIR', 'gcloud config folder; empty gives the profile its own', None),
+    ('RAILWAY', 'login: this computer\'s railway login; token: an account token from Keychain', ('login', 'token')),
+    ('AWS_PROFILE', 'Profile name from ~/.aws/config, or empty', None),
+]
+FIELD_KEYS = [f[0] for f in FIELDS]
+
+# The parts of settings.json that describe a setup rather than a machine.
+PORTABLE_SETTINGS = ['enabledPlugins', 'extraKnownMarketplaces', 'pluginConfigs', 'inputNeededNotifEnabled',
+                     'agentPushNotifEnabled', 'outputStyle', 'statusLine', 'model', 'theme']
+
+NAME_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,31}$')
+# Words claude-as reads as commands can't name a profile.
+RESERVED = {'list', 'ls', 'add', 'new', 'edit', 'show', 'rename', 'remove', 'rm', 'fields', 'help', 'setup', 'status', 'open', 'shell', 'exec'}
+
+
+class Fail(Exception):
+    pass
+
+
+def out(text=''):
+    print(text)
+
+
+# ── profiles ─────────────────────────────────────────────────────────────
+
+def env_path(name):
+    return os.path.join(PROFILES, f'{name}.env')
+
+
+def config_dir(name):
+    return os.path.join(DATA_ROOT, name, 'claude')
+
+
+def profile_names():
+    return sorted(f[:-4] for f in os.listdir(PROFILES) if f.endswith('.env') and f != '_template.env')
+
+
+def need_profile(name):
+    if not os.path.exists(env_path(name)):
+        known = ', '.join(profile_names()) or 'none yet'
+        raise Fail(f"no profile '{name}' (profiles: {known})")
+
+
+def read_fields(path):
+    values = {}
+    for line in open(path):
+        m = re.match(r'^([A-Z_]+)=(.*)$', line.strip())
+        if m and m.group(1) in FIELD_KEYS:
+            values[m.group(1)] = ' '.join(shlex.split(m.group(2))) if m.group(2) else ''
+    return values
+
+
+def quote(value):
+    return f'"{value}"' if re.search(r'[\s#$"\'`\\]', value) else value
+
+
+def write_fields(path, changes):
+    lines = open(path).read().splitlines()
+    seen = set()
+    for i, line in enumerate(lines):
+        m = re.match(r'^([A-Z_]+)=', line)
+        if m and m.group(1) in changes:
+            lines[i] = f'{m.group(1)}={quote(changes[m.group(1)])}'
+            seen.add(m.group(1))
+    for key, value in changes.items():
+        if key not in seen:
+            lines.append(f'{key}={quote(value)}')
+    open(path, 'w').write('\n'.join(lines) + '\n')
+
+
+def parse_assignments(args):
+    changes = {}
+    for arg in args:
+        if '=' not in arg:
+            raise Fail(f"expected KEY=value, got '{arg}' (fields: claude-as fields)")
+        key, value = arg.split('=', 1)
+        key = key.strip().upper()
+        if key not in FIELD_KEYS:
+            raise Fail(f"unknown field '{key}' (fields: {', '.join(FIELD_KEYS)})")
+        allowed = dict((f[0], f[2]) for f in FIELDS)[key]
+        if allowed and value not in allowed:
+            raise Fail(f"{key} must be one of: {', '.join(allowed)}")
+        if '"' in value or '`' in value or '$(' in value:
+            raise Fail(f'{key}: quotes, backticks and $( ) are not allowed in a value')
+        changes[key] = value
+    return changes
+
+
+def cmd_fields(_args):
+    out('Profile fields (claude-as edit <profile> KEY=value):')
+    for key, desc, allowed in FIELDS:
+        extra = f"  [{' | '.join(allowed)}]" if allowed else ''
+        out(f'  {key:<18} {desc}{extra}')
+
+
+def cmd_list(_args):
+    names = profile_names()
+    if not names:
+        out('No profiles yet. Create one: claude-as add <name>')
+        return
+    out('Profiles:')
+    for name in names:
+        f = read_fields(env_path(name))
+        ready = 'set up' if os.path.exists(os.path.join(config_dir(name), 'settings.json')) else 'not set up'
+        out(f"  {name:<14} {f.get('PROFILE_DESC', ''):<46} {ready}")
+    out()
+    out('Start one: claude-as <name>    Details: claude-as <name> list')
+
+
+def cmd_add(args):
+    if not args:
+        raise Fail('usage: claude-as add <name> [--from <profile>] [KEY=value ...]')
+    name, rest = args[0], args[1:]
+    if not NAME_RE.match(name) or name in RESERVED:
+        raise Fail('a profile name is lowercase letters, digits, - or _ (up to 32), and not a claude-as command')
+    if os.path.exists(env_path(name)):
+        raise Fail(f"profile '{name}' exists; change it with: claude-as edit {name} KEY=value")
+    source = TEMPLATE
+    if rest[:1] == ['--from']:
+        if len(rest) < 2:
+            raise Fail('--from needs a profile name')
+        need_profile(rest[1])
+        source, rest = env_path(rest[1]), rest[2:]
+    changes = parse_assignments(rest)
+    shutil.copyfile(source, env_path(name))
+    if source != TEMPLATE:
+        # A copy starts with the other profile's accounts; say whose it is now.
+        changes.setdefault('PROFILE_DESC', f'{name} (copied from {os.path.basename(source)[:-4]})')
+    if changes:
+        write_fields(env_path(name), changes)
+    out(f'✓ Created profile {name}: {env_path(name)}')
+    show_fields(name)
+    out()
+    out(f'Next: fill any empty fields (claude-as edit {name} KEY=value), then run: claude-as {name} setup')
+
+
+def show_fields(name):
+    values = read_fields(env_path(name))
+    for key, desc, _ in FIELDS:
+        value = values.get(key, '')
+        out(f"  {key:<18} {value or '·'}")
+
+
+def cmd_edit(args):
+    if not args:
+        raise Fail('usage: claude-as edit <profile> KEY=value ...')
+    name = args[0]
+    need_profile(name)
+    if len(args) == 1:
+        out(f'Profile {name} ({env_path(name)}):')
+        show_fields(name)
+        out()
+        out(f'Change one: claude-as edit {name} KEY=value   (fields: claude-as fields)')
+        return
+    changes = parse_assignments(args[1:])
+    write_fields(env_path(name), changes)
+    for key, value in changes.items():
+        out(f"✓ {name}: {key}={value or '(empty)'}")
+    if 'GOOGLE_ACCOUNT' in changes:
+        token = os.path.join(DATA_ROOT, name, 'google-drive', 'tokens.json')
+        if os.path.exists(token):
+            out(f'  The profile still holds the old Google account; to switch it, remove {token} and run: claude-as {name} setup')
+
+
+def cmd_rename(args):
+    if len(args) != 2:
+        raise Fail('usage: claude-as rename <old> <new>')
+    old, new = args
+    need_profile(old)
+    if not NAME_RE.match(new) or new in RESERVED:
+        raise Fail('a profile name is lowercase letters, digits, - or _ (up to 32), and not a claude-as command')
+    if os.path.exists(env_path(new)) or os.path.exists(os.path.join(DATA_ROOT, new)):
+        raise Fail(f"'{new}' is taken")
+    os.rename(env_path(old), env_path(new))
+    if os.path.exists(os.path.join(DATA_ROOT, old)):
+        os.rename(os.path.join(DATA_ROOT, old), os.path.join(DATA_ROOT, new))
+    moved = rename_keychain(old, new)
+    out(f'✓ Renamed {old} → {new}' + (' (Railway token moved too)' if moved else ''))
+
+
+def rename_keychain(old, new):
+    # Moves the Railway token between Keychain accounts without printing it.
+    got = subprocess.run(['security', 'find-generic-password', '-s', 'claude-as.railway', '-a', old, '-w'],
+                         capture_output=True, text=True)
+    if got.returncode != 0:
+        return False
+    subprocess.run(['security', 'add-generic-password', '-U', '-s', 'claude-as.railway', '-a', new, '-w',
+                    got.stdout.strip()], capture_output=True)
+    subprocess.run(['security', 'delete-generic-password', '-s', 'claude-as.railway', '-a', old], capture_output=True)
+    return True
+
+
+def cmd_remove(args):
+    if not args:
+        raise Fail('usage: claude-as remove <profile>')
+    name = args[0]
+    need_profile(name)
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    attic = os.path.join(DATA_ROOT, '.removed', f'{name}-{stamp}')
+    os.makedirs(attic, exist_ok=True)
+    shutil.move(env_path(name), os.path.join(attic, f'{name}.env'))
+    if os.path.exists(os.path.join(DATA_ROOT, name)):
+        shutil.move(os.path.join(DATA_ROOT, name), os.path.join(attic, 'data'))
+    out(f'✓ Removed profile {name}. Its file and data are kept in {attic}; delete that folder to remove them for good.')
+
+
+# ── one profile's setup ──────────────────────────────────────────────────
+
+def cfg(name):
+    path = config_dir(name)
+    if not os.path.exists(os.path.join(path, 'settings.json')):
+        raise Fail(f"profile '{name}' is not set up yet: claude-as {name} setup")
+    return path
+
+
+def load_json(path, default):
+    try:
+        return json.load(open(path))
+    except (OSError, ValueError):
+        return default
+
+
+def save_json(path, data):
+    json.dump(data, open(path, 'w'), indent=2)
+    open(path, 'a').write('\n')
+
+
+def claude(name, *args, check=True):
+    env = {**os.environ, 'CLAUDE_CONFIG_DIR': config_dir(name)}
+    got = subprocess.run(['claude', *args], env=env, capture_output=True, text=True)
+    text = (got.stdout + got.stderr).strip()
+    if check and got.returncode != 0:
+        raise Fail(text.splitlines()[-1] if text else f"claude {' '.join(args)} failed")
+    return text
+
+
+def mcp_servers(name):
+    return load_json(os.path.join(config_dir(name), '.claude.json'), {}).get('mcpServers', {})
+
+
+def skills_of(name):
+    folder = os.path.join(config_dir(name), 'skills')
+    if not os.path.isdir(folder):
+        return {}
+    found = {}
+    for entry in sorted(os.listdir(folder)):
+        path = os.path.join(folder, entry)
+        if os.path.isdir(path):
+            found[entry] = os.path.realpath(path) if os.path.islink(path) else None
+    return found
+
+
+def describe_mcp(spec):
+    if spec.get('url'):
+        return f"{spec.get('type', 'http')} {spec['url']}"
+    return ' '.join([spec.get('command', '')] + list(spec.get('args', [])))
+
+
+def cmd_profile_list(name, args):
+    what = args[0] if args else 'all'
+    path = cfg(name) if what != 'accounts' else config_dir(name)
+    if what in ('all', 'accounts'):
+        f = read_fields(env_path(name))
+        out(f"Profile {name}: {f.get('PROFILE_DESC', '')}")
+        out(f'  Claude folder  {path}')
+        out()
+        out('Accounts (claude-as edit {0} KEY=value):'.format(name))
+        show_fields(name)
+    settings = load_json(os.path.join(path, 'settings.json'), {})
+    if what in ('all', 'plugins'):
+        out()
+        out(f'Plugins (claude-as {name} add|remove|enable|disable plugin <plugin@marketplace>):')
+        plugins = settings.get('enabledPlugins', {})
+        for plugin, on in sorted(plugins.items()):
+            out(f"  {'on ' if on else 'off'}  {plugin}")
+        if not plugins:
+            out('  none')
+    if what in ('all', 'marketplaces'):
+        out()
+        out(f'Marketplaces (claude-as {name} add|remove marketplace <source|name>):')
+        for mkt, m in sorted(settings.get('extraKnownMarketplaces', {}).items()):
+            src = m.get('source', {})
+            out(f"  {mkt:<30} {src.get('repo') or src.get('path') or src.get('url')}")
+    if what in ('all', 'mcp'):
+        out()
+        out(f'MCP servers, every project (claude-as {name} add|remove mcp <name> ...):')
+        servers = mcp_servers(name)
+        for server, spec in sorted(servers.items()):
+            out(f'  {server:<20} {describe_mcp(spec)}')
+        if not servers:
+            out('  none (project .mcp.json servers still load in their projects)')
+    if what in ('all', 'skills'):
+        out()
+        out(f'Skills (claude-as {name} add|remove skill <name|path>):')
+        skills = skills_of(name)
+        for skill, target in skills.items():
+            where = f'→ {target}' if target else '(copy in the profile)'
+            out(f'  {skill:<20} {where}')
+        if not skills:
+            out('  none')
+    if what in ('all', 'settings'):
+        out()
+        out(f'Settings (claude-as {name} edit setting <key> <value>):')
+        rest = {k: v for k, v in settings.items() if k not in ('enabledPlugins', 'extraKnownMarketplaces')}
+        for key, value in sorted(rest.items()):
+            out(f'  {key:<24} {json.dumps(value)[:90]}')
+        if not rest:
+            out('  none')
+
+
+def parse_value(text):
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def set_dotted(data, dotted, value):
+    keys = dotted.split('.')
+    for key in keys[:-1]:
+        data = data.setdefault(key, {})
+        if not isinstance(data, dict):
+            raise Fail(f'{dotted}: {key} is not an object')
+    if value is None:
+        data.pop(keys[-1], None)
+    else:
+        data[keys[-1]] = value
+
+
+def skill_source(arg):
+    in_repo = os.path.join(REPO, 'skills', arg)
+    if os.path.isdir(in_repo):
+        return in_repo
+    path = os.path.realpath(os.path.expanduser(arg))
+    if os.path.isfile(os.path.join(path, 'SKILL.md')):
+        return path
+    raise Fail(f"no skill '{arg}': name one in {os.path.join(REPO, 'skills')} or give a folder with a SKILL.md")
+
+
+def cmd_profile_add(name, args):
+    if len(args) < 2:
+        raise Fail(f'usage: claude-as {name} add plugin|marketplace|mcp|skill <what> ...')
+    kind, what, rest = args[0], args[1], args[2:]
+    path = cfg(name)
+    if kind == 'plugin':
+        out(claude(name, 'plugin', 'install', what).splitlines()[-1])
+    elif kind == 'marketplace':
+        out(claude(name, 'plugin', 'marketplace', 'add', what).splitlines()[-1])
+    elif kind == 'mcp':
+        if not rest:
+            raise Fail(f"usage: claude-as {name} add mcp <name> '<json>'  or  <name> [--transport http] <command|url> [args...]")
+        if rest[0].lstrip().startswith('{'):
+            json.loads(rest[0])
+            claude(name, 'mcp', 'add-json', '-s', 'user', what, rest[0])
+        else:
+            claude(name, 'mcp', 'add', '-s', 'user', what, *rest)
+        out(f'✓ {name}: MCP server {what} added for every project')
+    elif kind == 'skill':
+        src = skill_source(what)
+        dest = os.path.join(path, 'skills', os.path.basename(src))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.lexists(dest):
+            raise Fail(f'{name} already has a skill {os.path.basename(src)}')
+        os.symlink(src, dest)
+        out(f'✓ {name}: skill {os.path.basename(src)} linked from {src}')
+    else:
+        raise Fail(f"can't add a '{kind}': plugin, marketplace, mcp or skill")
+
+
+def cmd_profile_remove(name, args):
+    if len(args) < 2:
+        raise Fail(f'usage: claude-as {name} remove plugin|marketplace|mcp|skill|setting <what>')
+    kind, what = args[0], args[1]
+    path = cfg(name)
+    if kind == 'plugin':
+        out(claude(name, 'plugin', 'uninstall', what).splitlines()[-1])
+    elif kind == 'marketplace':
+        out(claude(name, 'plugin', 'marketplace', 'remove', what).splitlines()[-1])
+    elif kind == 'mcp':
+        claude(name, 'mcp', 'remove', '-s', 'user', what)
+        out(f'✓ {name}: MCP server {what} removed')
+    elif kind == 'skill':
+        dest = os.path.join(path, 'skills', what)
+        if os.path.islink(dest):
+            os.unlink(dest)
+        elif os.path.isdir(dest):
+            shutil.move(dest, os.path.join(path, 'backups', f"skill-{what}.{time.strftime('%Y%m%d-%H%M%S')}"))
+        else:
+            raise Fail(f'{name} has no skill {what}')
+        out(f'✓ {name}: skill {what} removed')
+    elif kind == 'setting':
+        settings_path = os.path.join(path, 'settings.json')
+        settings = load_json(settings_path, {})
+        set_dotted(settings, what, None)
+        save_json(settings_path, settings)
+        out(f'✓ {name}: setting {what} removed')
+    else:
+        raise Fail(f"can't remove a '{kind}': plugin, marketplace, mcp, skill or setting")
+
+
+def cmd_profile_toggle(name, args, on):
+    if len(args) != 2 or args[0] != 'plugin':
+        raise Fail(f"usage: claude-as {name} {'enable' if on else 'disable'} plugin <plugin@marketplace>")
+    cfg(name)
+    out(claude(name, 'plugin', 'enable' if on else 'disable', args[1]).splitlines()[-1])
+
+
+def cmd_profile_edit(name, args):
+    if not args:
+        raise Fail(f'usage: claude-as {name} edit account KEY=value ...  |  setting <key> <value>  |  mcp <name> <json>')
+    kind, rest = args[0], args[1:]
+    if kind in ('account', 'accounts'):
+        cmd_edit([name, *rest])
+    elif kind == 'setting':
+        if len(rest) != 2:
+            raise Fail(f'usage: claude-as {name} edit setting <key, dots for nesting> <value, JSON or text>')
+        settings_path = os.path.join(cfg(name), 'settings.json')
+        settings = load_json(settings_path, {})
+        set_dotted(settings, rest[0], parse_value(rest[1]))
+        save_json(settings_path, settings)
+        out(f'✓ {name}: {rest[0]} = {json.dumps(parse_value(rest[1]))}')
+    elif kind == 'mcp':
+        if len(rest) != 2:
+            raise Fail(f"usage: claude-as {name} edit mcp <name> '<json>'")
+        json.loads(rest[1])
+        cfg(name)
+        claude(name, 'mcp', 'remove', '-s', 'user', rest[0], check=False)
+        claude(name, 'mcp', 'add-json', '-s', 'user', rest[0], rest[1])
+        out(f'✓ {name}: MCP server {rest[0]} replaced')
+    else:
+        raise Fail(f"can't edit '{kind}': account, setting or mcp")
+
+
+def cmd_profile_copy(name, args):
+    if not args:
+        raise Fail(f'usage: claude-as {name} copy <to-profile> [plugins|mcp|skills|settings|all]')
+    target, what = args[0], (args[1] if len(args) > 1 else 'all')
+    need_profile(target)
+    src, dst = cfg(name), cfg(target)
+    done = []
+    src_settings = load_json(os.path.join(src, 'settings.json'), {})
+    if what in ('all', 'plugins'):
+        dst_settings = load_json(os.path.join(dst, 'settings.json'), {})
+        for mkt, m in src_settings.get('extraKnownMarketplaces', {}).items():
+            if mkt not in dst_settings.get('extraKnownMarketplaces', {}):
+                s = m.get('source', {})
+                claude(target, 'plugin', 'marketplace', 'add', os.path.expanduser(s.get('repo') or s.get('path') or s.get('url')), check=False)
+        have = load_json(os.path.join(dst, 'settings.json'), {}).get('enabledPlugins', {})
+        for plugin, on in src_settings.get('enabledPlugins', {}).items():
+            if plugin.endswith('@builtin'):
+                continue
+            if plugin not in have:
+                claude(target, 'plugin', 'install', plugin, check=False)
+            if not on:
+                claude(target, 'plugin', 'disable', plugin, check=False)
+            done.append(f'plugin {plugin}')
+    if what in ('all', 'mcp'):
+        theirs = mcp_servers(target)
+        for server, spec in mcp_servers(name).items():
+            if server not in theirs:
+                claude(target, 'mcp', 'add-json', '-s', 'user', server, json.dumps(spec))
+                done.append(f'mcp {server}')
+    if what in ('all', 'skills'):
+        for skill, link in skills_of(name).items():
+            dest = os.path.join(dst, 'skills', skill)
+            if not os.path.lexists(dest):
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                if link:
+                    os.symlink(link, dest)
+                else:
+                    shutil.copytree(os.path.join(src, 'skills', skill), dest)
+                done.append(f'skill {skill}')
+    if what in ('all', 'settings'):
+        dst_path = os.path.join(dst, 'settings.json')
+        dst_settings = load_json(dst_path, {})
+        for key in PORTABLE_SETTINGS:
+            if key in ('enabledPlugins', 'extraKnownMarketplaces') or key not in src_settings:
+                continue
+            value = src_settings[key]
+            dst_settings[key] = {**dst_settings.get(key, {}), **value} if isinstance(value, dict) else value
+            done.append(f'setting {key}')
+        save_json(dst_path, dst_settings)
+    out(f'✓ Copied {name} → {target}: ' + (', '.join(done) if done else 'nothing new'))
+
+
+# ── handing a setup to someone else ──────────────────────────────────────
+
+SECRETISH = re.compile(r'(key|token|secret|password|auth|cookie|credential|bearer)', re.I)
+
+
+def redact_mcp(server, spec):
+    """Replace env and header values with ${VAR} placeholders; return the names asked for."""
+    spec = json.loads(json.dumps(spec))
+    asked = []
+    for field in ('env', 'headers'):
+        for key, value in list(spec.get(field, {}).items()):
+            if isinstance(value, str) and value.startswith('${') and value.endswith('}'):
+                asked.append(value[2:-1])
+                continue
+            var = re.sub(r'[^A-Z0-9]+', '_', f'{server}_{key}'.upper()).strip('_')
+            spec[field][key] = '${' + var + '}'
+            asked.append(var)
+    return spec, asked
+
+
+def cmd_profile_export(name, args):
+    if not args:
+        raise Fail(f'usage: claude-as {name} export <folder> [--title "Client name"]')
+    dest = os.path.realpath(os.path.expanduser(args[0]))
+    title = args[args.index('--title') + 1] if '--title' in args and args.index('--title') + 1 < len(args) else name
+    path = cfg(name)
+    if os.path.exists(dest) and os.listdir(dest):
+        raise Fail(f'{dest} is not empty')
+    os.makedirs(dest, exist_ok=True)
+
+    # The tooling, so the bundle installs and runs claude-as by itself.
+    for rel in ('install.sh', 'export.sh', 'bin/claude-as', 'bin/claude-as-config', 'profiles/_template.env', '.gitignore'):
+        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
+        shutil.copy2(os.path.join(REPO, rel), os.path.join(dest, rel))
+
+    settings = load_json(os.path.join(path, 'settings.json'), {})
+    portable = {k: settings[k] for k in PORTABLE_SETTINGS if k in settings}
+
+    # This repo's own marketplace travels as plugins inside the bundle.
+    own = load_json(os.path.join(REPO, '.claude-plugin', 'marketplace.json'), {})
+    own_name = own.get('name', '')
+    own_plugins = [p for p in own.get('plugins', []) if portable.get('enabledPlugins', {}).get(f"{p['name']}@{own_name}")]
+    if own_plugins:
+        os.makedirs(os.path.join(dest, '.claude-plugin'), exist_ok=True)
+        save_json(os.path.join(dest, '.claude-plugin', 'marketplace.json'), {**own, 'plugins': own_plugins})
+        for p in own_plugins:
+            src = os.path.normpath(os.path.join(REPO, p['source']))
+            shutil.copytree(src, os.path.join(dest, p['source']), ignore=shutil.ignore_patterns('types', 'tsconfig.json'))
+    for mkt, m in portable.get('extraKnownMarketplaces', {}).items():
+        src = m.get('source', {})
+        if mkt == own_name:
+            src['path'] = '{{REPO}}'
+        elif 'path' in src:
+            src['path'] = src['path'].replace(HOME, '~', 1)
+    if own_name and not own_plugins:
+        portable.get('extraKnownMarketplaces', {}).pop(own_name, None)
+    os.makedirs(os.path.join(dest, 'settings'), exist_ok=True)
+    save_json(os.path.join(dest, 'settings', 'settings.json'), portable)
+
+    asked = []
+    servers = {}
+    for server, spec in mcp_servers(name).items():
+        servers[server], names = redact_mcp(server, spec)
+        asked += names
+    save_json(os.path.join(dest, 'settings', 'mcp.json'), servers)
+
+    os.makedirs(os.path.join(dest, 'skills'), exist_ok=True)
+    for skill in skills_of(name):
+        shutil.copytree(os.path.join(path, 'skills', skill), os.path.join(dest, 'skills', skill), symlinks=False)
+
+    plugin_lines = '\n'.join(f"| `{p}` | {'on' if on else 'off'} |" for p, on in sorted(portable.get('enabledPlugins', {}).items()))
+    mcp_lines = '\n'.join(f'| `{s}` | {describe_mcp(spec)} |' for s, spec in sorted(servers.items())) or '| none | |'
+    skill_lines = '\n'.join(f'| `{s}` |' for s in skills_of(name)) or '| none |'
+    secret_lines = '\n'.join(f'- `{v}`' for v in sorted(set(asked)))
+    readme = f"""# Claude Code setup: {title}
+
+A ready Claude Code setup: plugins, MCP servers, skills and settings, plus `claude-as` to keep separate accounts in separate profiles.
+
+## Install
+
+```bash
+./install.sh
+```
+
+Then start a new Claude Code session. `install.sh` is safe to run again; it backs up the settings it changes.
+{f'''
+Before installing, set these in your shell (or your keychain-backed env) for the MCP servers that need them:
+
+{secret_lines}
+''' if asked else ''}
+## What's included
+
+| Plugin | |
+|---|---|
+{plugin_lines}
+
+| MCP server (every project) | |
+|---|---|
+{mcp_lines}
+
+| Skill |
+|---|
+{skill_lines}
+
+## Profiles
+
+To keep several accounts apart, create a profile per account and start Claude through it:
+
+```bash
+claude-as add work GH_USER=you GIT_EMAIL=you@company.com
+```
+
+```bash
+claude-as work setup
+```
+
+```bash
+claude-as work
+```
+
+`claude-as fields` lists what a profile can name; `claude-as --help` lists every command. Profiles name real accounts, so `profiles/*.env` is git-ignored.
+"""
+    open(os.path.join(dest, 'README.md'), 'w').write(readme)
+    subprocess.run(['git', 'init', '-q', '-b', 'main', dest])
+    out(f'✓ Exported {name} to {dest}')
+    out(f"  {len(portable.get('enabledPlugins', {}))} plugins, {len(servers)} MCP servers, {len(skills_of(name))} skills; no accounts or tokens")
+    if asked:
+        out(f"  MCP values replaced with placeholders: {', '.join(sorted(set(asked)))}")
+    out(f'  Review it, then commit and share: cd {shlex.quote(dest)} && git add -A && git commit -m "Claude Code setup"')
+
+
+# ── dispatch ─────────────────────────────────────────────────────────────
+
+TOP = {'list': cmd_list, 'ls': cmd_list, 'add': cmd_add, 'new': cmd_add, 'edit': cmd_edit, 'show': cmd_edit,
+       'rename': cmd_rename, 'remove': cmd_remove, 'rm': cmd_remove, 'fields': cmd_fields}
+PER_PROFILE = {'list': cmd_profile_list, 'ls': cmd_profile_list, 'add': cmd_profile_add, 'remove': cmd_profile_remove,
+               'rm': cmd_profile_remove, 'edit': cmd_profile_edit, 'copy': cmd_profile_copy, 'export': cmd_profile_export,
+               'enable': lambda n, a: cmd_profile_toggle(n, a, True), 'disable': lambda n, a: cmd_profile_toggle(n, a, False)}
+
+
+def main(argv):
+    try:
+        if argv and argv[0] in TOP:
+            TOP[argv[0]](argv[1:])
+        elif len(argv) >= 2 and argv[1] in PER_PROFILE:
+            need_profile(argv[0])
+            PER_PROFILE[argv[1]](argv[0], argv[2:])
+        else:
+            raise Fail('unknown command (claude-as --help)')
+    except Fail as err:
+        print(f'claude-as: {err}', file=sys.stderr)
+        return 1
+    except ValueError as err:
+        print(f'claude-as: not valid JSON: {err}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

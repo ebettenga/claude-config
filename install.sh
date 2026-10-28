@@ -69,4 +69,23 @@ PY
   fi
 done
 
+# 5. MCP servers for every project, from settings/mcp.json. ${VAR} values come
+#    from this shell's environment; a server missing one is skipped.
+if [ -f "$REPO/settings/mcp.json" ]; then
+  python3 - "$REPO/settings/mcp.json" <<'PY' | while IFS=$'\t' read -r name spec; do
+import json, os, re, sys
+for name, spec in json.load(open(sys.argv[1])).items():
+    text = json.dumps(spec)
+    missing = [v for v in re.findall(r'\$\{([A-Za-z0-9_]+)\}', text) if v not in os.environ]
+    if missing:
+        print(f"skip\t{name}: set {', '.join(missing)} and run install.sh again")
+        continue
+    print(name, re.sub(r'\$\{([A-Za-z0-9_]+)\}', lambda m: os.environ[m.group(1)], text), sep='\t')
+PY
+    if [ "$name" = skip ]; then echo "· mcp $spec"; continue; fi
+    claude mcp remove -s user "$name" >/dev/null 2>&1 || true
+    claude mcp add-json -s user "$name" "$spec" >/dev/null 2>&1 && echo "✓ mcp $name" || echo "✗ mcp $name failed"
+  done
+fi
+
 echo "Done. Start a new Claude Code session (or run /reload-plugins) to load everything."

@@ -22,21 +22,42 @@ Then start a new Claude Code session, or run `/reload-plugins`.
 
 Each profile is a separate Claude Code setup with its own accounts, so work for one person or client never mixes with another. A profile has its own Claude config folder (settings, plugins, MCP sign-ins, memory, history) and points GitHub, git, Google, gcloud, Railway and AWS at that profile's accounts.
 
-```bash
-claude-as
-```
+`claude-as --help` lists every command. The main ones:
 
-lists the profiles. Then:
+**Profiles**
 
 | Command | Does |
 |---|---|
-| `claude-as acme` | Start Claude as the `acme` profile (extra arguments go to `claude`) |
+| `claude-as list` | List profiles and whether each is set up |
+| `claude-as add acme [--from other] [KEY=value ...]` | Create a profile from the template or another profile |
+| `claude-as edit acme [KEY=value ...]` | Show or change its accounts (`claude-as fields` lists them) |
+| `claude-as rename acme acme-co` / `claude-as remove acme` | Rename, or remove (kept in `~/.claude-profiles/.removed/`) |
+
+**Using one**
+
+| Command | Does |
+|---|---|
+| `claude-as acme` | Start Claude as `acme` (extra arguments go to `claude`) |
 | `claude-as acme open [folder]` | Open a new terminal window running Claude as `acme` (Ghostty, iTerm or Terminal) |
 | `claude-as acme status` | Show who each tool is signed in as |
-| `claude-as acme shell` | A shell with that profile's accounts, for running `gh`, `railway`, `gcloud` yourself |
-| `claude-as acme exec <cmd>` | Run one command as that profile |
+| `claude-as acme shell` / `exec <cmd>` | A shell, or one command, with that profile's accounts |
 | `claude-as acme setup` | First-time setup: installs plugins into the profile, copies its Google account, offers to store a Railway token |
-| `claude-as new acme` | Create `profiles/acme.env` from the template |
+
+**Its setup**
+
+| Command | Does |
+|---|---|
+| `claude-as acme list [plugins\|mcp\|skills\|settings\|...]` | Everything the profile has, or one part |
+| `claude-as acme add plugin\|marketplace\|mcp\|skill ...` | Add one (`add mcp <name> '<json>'` for MCP servers) |
+| `claude-as acme remove plugin\|marketplace\|mcp\|skill\|setting ...` | Remove one |
+| `claude-as acme enable\|disable plugin <plugin>` | Turn a plugin on or off |
+| `claude-as acme edit setting <key> <value>` / `edit mcp <name> '<json>'` | Change a setting or an MCP server |
+| `claude-as acme copy other [plugins\|mcp\|skills\|settings\|all]` | Copy setup from one profile to another |
+| `claude-as acme export ~/clients/acme-setup --title "Acme"` | Package the setup for someone else (below) |
+
+### Handing a setup to a client
+
+`claude-as <profile> export <folder>` writes a git repo with that profile's plugins (your own ones copied in), marketplaces, MCP servers, skills and settings, plus `install.sh` and `claude-as`. It has no accounts or profiles. MCP `env` and header values become `${VAR}` placeholders, and its README lists them. The client runs `./install.sh` with those variables set, and gets the same setup.
 
 A profile is `profiles/<name>.env`: account names only, never secrets. Profiles are git-ignored, since they name real accounts: each computer keeps its own, made with `claude-as new <name>` from `profiles/_template.env`. A profile's data (Claude config, sign-ins, history) lives in `~/.claude-profiles/<name>/`, outside the repo.
 
@@ -74,9 +95,11 @@ It copies the portable parts of `~/.claude/settings.json` (plugins, marketplaces
 | `.claude-plugin/marketplace.json` | The `ethan-claude` marketplace: my own plugins |
 | `plugins/filedeck/` | Filedeck, a file pane with what Claude touched, a badge-styled tree with inline diffs, and a git panel to stage, commit and push |
 | `settings/settings.json` | Portable settings; `{{REPO}}` stands for this folder's path |
+| `settings/mcp.json` | Optional: MCP servers for every project, `${VAR}` for secrets (an export writes one) |
 | `skills/` | User-level skills, `claude-as` among them |
 | `profiles/` | `_template.env`; your own profiles sit beside it, git-ignored |
 | `bin/claude-as` | The profile launcher |
+| `bin/claude-as-config` | Profile management behind `claude-as list/add/edit/...` |
 
 ## Working on my plugins
 

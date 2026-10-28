@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
-# claude-as: run Claude Code (or any command) as one of your profiles.
+# claude-as: run Claude Code as one of your profiles, and manage the profiles.
 #
-#   claude-as                      list profiles
-#   claude-as <profile> [args]     start claude as that profile (args go to claude)
-#   claude-as <profile> shell      open a shell with that profile's accounts
-#   claude-as <profile> exec CMD   run one command as that profile
-#   claude-as <profile> status     show who each tool is signed in as
-#   claude-as <profile> setup      first-time setup: plugins, Google, Railway token
-#   claude-as <profile> open [DIR]  open a new terminal window running claude as that profile
-#   claude-as new <profile>        create a profile from the template
+# Profiles
+#   claude-as list                          list profiles
+#   claude-as add <name> [--from <p>] [KEY=value ...]
+#                                           create a profile (from the template or another profile)
+#   claude-as edit <name> [KEY=value ...]   show or change a profile's accounts
+#   claude-as rename <old> <new>            rename a profile and its data
+#   claude-as remove <name>                 remove a profile (kept in ~/.claude-profiles/.removed)
+#   claude-as fields                        what a profile's accounts can name
+#
+# Using a profile
+#   claude-as <p> [claude args]             start claude as the profile
+#   claude-as <p> open [DIR]                open a new terminal window running claude as the profile
+#   claude-as <p> shell | exec CMD          a shell, or one command, with the profile's accounts
+#   claude-as <p> status                    who each tool is signed in as
+#   claude-as <p> setup                     first-time setup: plugins, Google, Railway token
+#
+# A profile's setup
+#   claude-as <p> list [accounts|plugins|marketplaces|mcp|skills|settings]
+#   claude-as <p> add plugin <plugin@marketplace> | marketplace <source> | skill <name|path>
+#   claude-as <p> add mcp <name> '<json>' | <name> [--transport http] <command|url> [args...]
+#   claude-as <p> remove plugin|marketplace|mcp|skill|setting <what>
+#   claude-as <p> enable|disable plugin <plugin@marketplace>
+#   claude-as <p> edit account KEY=value | setting <key> <value> | mcp <name> '<json>'
+#   claude-as <p> copy <other> [plugins|mcp|skills|settings|all]
+#   claude-as <p> export <folder> [--title "Client"]   a shareable setup, without accounts or tokens
 #
 # A profile is profiles/<name>.env in this repo: account names only, never
-# secrets. Its data (Claude's config, sign-ins, history) lives in
-# ~/.claude-profiles/<name>/ and is never committed.
+# secrets, and git-ignored. Its data (Claude's config, sign-ins, history)
+# lives in ~/.claude-profiles/<name>/.
 set -euo pipefail
 
 # Follow a symlinked claude-as (as installed in ~/.local/bin) back to this repo.
@@ -29,18 +46,6 @@ KEYCHAIN_SERVICE="claude-as.railway"
 
 die() { echo "claude-as: $*" >&2; exit 1; }
 expand() { case "$1" in "~"/*) echo "$HOME/${1#\~/}" ;; "~") echo "$HOME" ;; *) echo "$1" ;; esac; }
-
-list() {
-  echo "Profiles (in $PROFILES):"
-  for f in "$PROFILES"/*.env; do
-    name="$(basename "$f" .env)"
-    [ "$name" = _template ] && continue
-    desc="$(sed -n 's/^PROFILE_DESC="\(.*\)"$/\1/p' "$f")"
-    printf '  %-14s %s\n' "$name" "$desc"
-  done
-  echo
-  echo "Start one with: claude-as <profile>"
-}
 
 load() {
   PROFILE="$1"
@@ -205,16 +210,14 @@ OSA
   echo "Opened $app: claude as '$PROFILE' in $dir"
 }
 
-[ $# -eq 0 ] && { list; exit 0; }
-
-if [ "$1" = new ]; then
-  [ $# -ge 2 ] || die "usage: claude-as new <profile>"
-  dest="$PROFILES/$2.env"
-  [ -e "$dest" ] && die "profile '$2' exists"
-  cp "$PROFILES/_template.env" "$dest"
-  echo "Created $dest. Fill it in, then run: claude-as $2 setup"
-  exit 0
-fi
+MANAGE="$REPO/bin/claude-as-config"
+case "${1:-list}" in
+  -h|--help|help) sed -n '2,/^set -euo/p' "$self" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+  list|ls|add|new|edit|show|rename|remove|rm|fields) exec python3 "$MANAGE" "${@:-list}" ;;
+esac
+case "${2:-}" in
+  list|ls|add|remove|rm|edit|copy|export|enable|disable) exec python3 "$MANAGE" "$@" ;;
+esac
 
 load "$1"
 shift

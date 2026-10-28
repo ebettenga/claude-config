@@ -7,3 +7,4 @@ plugins/*/tsconfig.json
 # Only the template is shared; create profiles with: claude-as new <name>
 profiles/*.env
 !profiles/_template.env
+__pycache__/

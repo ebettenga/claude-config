@@ -1,77 +1,97 @@
 ---
 name: claude-as
-description: Open, check or act as one of the user's claude-as profiles (separate Claude Code setups with their own GitHub, git, Google, gcloud, Railway and AWS accounts, such as a personal profile and one per company or client). Use when the user asks to switch to, open, start or work as a profile, client or account ("open the acme profile", "start a personal session", "switch to work"), asks which account a tool is using, wants one command run as another profile ("push this as acme", "list Railway projects as personal"), or wants a new profile.
-argument-hint: "[profile] [open|status|exec <command>|new]"
+description: Manage and use the user's claude-as profiles: separate Claude Code setups, each with its own accounts (GitHub, git, Google, gcloud, Railway, AWS) and its own plugins, MCP servers, skills and settings, such as a personal profile and one per company or client. Use when the user asks to list, add, edit, rename or remove a profile; to open, start, switch to or work as one ("open the acme profile", "start a personal session"); to see or change what a profile has installed ("add the Sentry MCP to acme", "what plugins does personal have", "turn off filetree for work"); to copy setup between profiles; to package a profile's setup for a client; to check which account a tool uses; or to run one command as another profile ("push this as acme").
+argument-hint: "[list | add <name> | edit <name> | <profile> [list|add|edit|remove|open|status|copy|export] ...]"
 ---
 
 # claude-as profiles
 
-`claude-as` is on PATH (`~/.local/bin/claude-as`, from the `claude-config` repo). Each profile is `profiles/<name>.env` in that repo and has its own Claude config folder under `~/.claude-profiles/<name>/`.
+`claude-as` is on PATH (`~/.local/bin/claude-as`, from the `claude-config` repo at `~/Documents/claude-config`). Everything goes through it; don't edit the files it manages by hand.
 
-## Arguments
+- A profile's **accounts** are `profiles/<name>.env` in that repo: account names only, git-ignored.
+- A profile's **setup** (plugins, marketplaces, MCP servers, skills, settings) lives in its Claude folder, `~/.claude-profiles/<name>/claude`. `claude-as` changes it through the `claude` CLI.
 
-`$ARGUMENTS` is what the user typed after `/claude-as`. Read it as:
+`claude-as --help` prints every command. `claude-as fields` lists the account fields.
 
-| Typed | Do |
+## Reading `/claude-as` arguments
+
+`$ARGUMENTS` is what the user typed after `/claude-as`, a `claude-as` command line. If it's empty, run `claude-as list` and ask what they want. A first word that's a profile name, followed by nothing, means open it (below). Anything else, run as given:
+
+```bash
+claude-as $ARGUMENTS
+```
+
+When the user asks in words instead, pick the command from the tables below.
+
+## Profiles
+
+| Want | Command |
 |---|---|
-| nothing | List profiles (below) and ask which to open |
-| `<profile>` | Open that profile (below) |
-| `<profile> status` | Show who each tool is signed in as |
-| `<profile> exec <command>` | Run that command as the profile |
-| `new <name>` | Create a profile |
+| See all profiles | `claude-as list` |
+| Create one | `claude-as add <name> [--from <profile>] [KEY=value ...]` |
+| See or change its accounts | `claude-as edit <name>` / `claude-as edit <name> KEY=value ...` |
+| Rename | `claude-as rename <old> <new>` |
+| Remove | `claude-as remove <name>` (moves it to `~/.claude-profiles/.removed/`) |
 
-Unless told otherwise, it's run in the current session's working directory.
+Account fields: `PROFILE_DESC`, `GH_USER`, `SSH_KEY`, `GIT_NAME`, `GIT_EMAIL`, `GOOGLE_ACCOUNT`, `GCLOUD_CONFIG_DIR`, `RAILWAY` (`login` or `token`), `AWS_PROFILE`. To find values:
 
-## List profiles
+- `gh auth status` lists the signed-in GitHub users.
+- `ssh -T -i <key> -o IdentitiesOnly=yes git@github.com` says which GitHub user a key belongs to.
+- `gcloud config configurations list` shows gcloud accounts.
 
-```bash
-claude-as
-```
+After creating a profile, the user runs `claude-as <name> setup` in their own terminal: it installs the plugins and settings and may ask for a Railway token.
 
-## Open a profile
+## A profile's setup
 
-Opens a new terminal window in the current folder, running Claude as that profile. That window is a separate session with its own accounts, history and memory; this session keeps its own accounts.
+| Want | Command |
+|---|---|
+| See everything | `claude-as <p> list` |
+| See one part | `claude-as <p> list accounts\|plugins\|marketplaces\|mcp\|skills\|settings` |
+| Add a plugin | `claude-as <p> add plugin <plugin@marketplace>` |
+| Add a marketplace | `claude-as <p> add marketplace <owner/repo or path>` |
+| Add an MCP server, every project | `claude-as <p> add mcp <name> '<json>'` or `claude-as <p> add mcp <name> [--transport http] <command or url> [args...]` |
+| Add a skill | `claude-as <p> add skill <name in the repo's skills/ or a folder path>` |
+| Turn a plugin on or off | `claude-as <p> enable\|disable plugin <plugin@marketplace>` |
+| Change a setting | `claude-as <p> edit setting <key, dots for nesting> <JSON or text>` |
+| Replace an MCP server | `claude-as <p> edit mcp <name> '<json>'` |
+| Remove something | `claude-as <p> remove plugin\|marketplace\|mcp\|skill\|setting <what>` |
+| Copy setup to another profile | `claude-as <p> copy <other> [plugins\|mcp\|skills\|settings\|all]` |
 
-```bash
-claude-as <profile> open "$PWD"
-```
+MCP JSON is Claude Code's own shape: `{"type":"stdio","command":"npx","args":["-y","pkg"],"env":{...}}` or `{"type":"http","url":"https://..."}`. A secret an MCP server needs (an API key, a token) never goes in the command line or the JSON: the user puts it in their environment, and the JSON names it as `"${VAR_NAME}"`.
 
-Pass another folder instead of `$PWD` if the user names one. Then tell the user the window is open and that its first start asks them to sign in to Claude and trust the folder, which they do themselves.
+Changes take effect in that profile's next session, or after `/reload-plugins` in an open one. Say so after a change.
 
-Opening a window is harmless and needs no confirmation.
+Run `claude-as <p> list <part>` before and after a change, so you can show the user what changed.
 
-## Check who a profile is
-
-```bash
-claude-as <profile> status
-```
-
-Report the table it prints. Use it before acting as a profile when it's unclear which account a tool will use.
-
-## Run one command as a profile
-
-```bash
-claude-as <profile> exec <command> [args...]
-```
-
-The command runs with that profile's GitHub token, git identity and SSH key, Google token file, gcloud config, Railway token and AWS profile. Reading is fine without asking. Anything that changes something in that profile's accounts (git push, deploys, Railway or gcloud changes, creating repos or issues) is acting as that person: say which profile and account it will run as and get a yes first, as for any outward-facing action.
-
-Commands run directly, not through a shell; for pipes or `&&`, use:
+## Handing a setup to a client
 
 ```bash
-claude-as <profile> exec /bin/zsh -c '<command line>'
+claude-as <p> export <folder> [--title "Client name"]
 ```
 
-## Create a profile
+This writes a git repo of that profile's setup: its plugins (the user's own plugins copied in), marketplaces, MCP servers, skills and settings, plus `install.sh` and `claude-as`. It has no accounts and no profile files, and every MCP `env` or header value is replaced with a `${VAR}` placeholder. Its README says what's included and which variables to set.
 
-```bash
-claude-as new <name>
-```
+After exporting:
 
-Then fill in `~/Documents/claude-config/profiles/<name>.env` with the user: the gh user (`gh auth status` lists the signed-in ones), SSH key (`ssh -T -i <key> git@github.com` shows its GitHub user), git name and email, Google account alias, gcloud folder, Railway mode, AWS profile. Account names only. After that the user runs `claude-as <name> setup` in their own terminal, since it may ask for a Railway token.
+1. Check the folder with the user. `settings/mcp.json` and the README's placeholder list are the parts to read.
+2. Committing it locally is fine; it starts as a fresh git repo.
+3. Pushing it anywhere, or sending it to the client, is sharing it: ask first.
+
+## Using a profile
+
+| Want | Command |
+|---|---|
+| Open a new terminal window running Claude as the profile | `claude-as <p> open "$PWD"` (or another folder) |
+| Who each tool is signed in as | `claude-as <p> status` |
+| Run one command as the profile | `claude-as <p> exec <command> [args...]`; for pipes or `&&`: `claude-as <p> exec /bin/zsh -c '<line>'` |
+
+- **Opening a window** is harmless. Tell the user the window is open, and that its first start asks them to sign in to Claude and trust the folder.
+- **Reading as a profile** (status, listing projects, viewing) needs no confirmation.
+- **Changing something in a profile's accounts** is acting as that person: a git push, a deploy, Railway or gcloud changes, creating repos or issues. First say which profile and account it will run as, and get a yes.
+- **Changing a profile's setup** (plugins, MCP, skills, settings, accounts fields) only changes this computer, so do it when asked.
 
 ## Never
 
-- Read, print or copy tokens or other secrets: not `gh auth token`, not `security find-generic-password -w`, not the token files under `~/.claude-profiles/` or `~/.config/google-drive-mcp/`.
+- Read, print or copy tokens or other secrets. That means not `gh auth token`, not `security find-generic-password -w`, and not the token files under `~/.claude-profiles/` or `~/.config/google-drive-mcp/`.
 - Sign in, or type a password or token, for the user. Sign-ins (`gh auth login`, `gcloud auth login`, `railway login`, Claude's own) are theirs to run.
-- Commit a profile's data folder or anything secret to `claude-config`.
+- Commit `profiles/<name>.env`, a profile's data folder, or anything secret to `claude-config`.
