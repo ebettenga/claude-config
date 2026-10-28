@@ -92,3 +92,31 @@ test('selecting a file opens its diff, and File shows its text', async ($, on) =
   expect(await ui.find({ type: 'Code' })).toBeFalsy()
   await ui.unmount()
 })
+
+test('a file Claude reads opens the tree to it and keeps a read mark', async ($, on) => {
+  engine(on)
+  on('ui.scroll', () => ({ value: {} }))
+  await $.command.run({ command: 'filedeck', args: '' })
+  await $.tool.call({ tool: 'Read', file_path: '/repo/src/app.ts' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // src opened by itself, and app.ts carries the read mark.
+  expect(await ui.find({ type: 'Text', text: /^app\.ts$/ })).toBeTruthy()
+  expect((await ui.findAll({ type: 'Text', text: /•/ })).length).toBeGreaterThan(0)
+  await ui.unmount()
+})
+
+test('clicking a file in Claude touched opens its viewer there, with Mention', async ($, on) => {
+  engine(on)
+  on('ui.scroll', () => ({ value: {} }))
+  await $.command.run({ command: 'filedeck', args: '' })
+  await $.tool.call({ tool: 'Read', file_path: '/repo/src/app.ts' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'tb:/repo/src/app.ts' })
+  expect(await ui.find({ type: 'Code' })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'pvm:/repo/src/app.ts' })).toBeTruthy()
+  // One viewer only: not also under the tree row.
+  expect((await ui.findAll({ type: 'Code' })).length).toBe(1)
+  await ui.press({ key: 'tb:/repo/src/app.ts' })
+  expect(await ui.find({ type: 'Code' })).toBeFalsy()
+  await ui.unmount()
+})

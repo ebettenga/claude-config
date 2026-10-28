@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, FsEntry, Register, RenderChildren } from 'claude-code'
 
-import type { GitFile, GitSnap, PreviewMode, Tab, Touch } from '../types'
+import type { GitFile, GitSnap, PreviewMode, SelectionSite, Tab, Touch } from '../types'
 
 const PANE = 'filedeck'
 const MAX_ROWS = 400
@@ -21,11 +21,26 @@ const tab = atom({ plugin: 'filedeck', key: 'tab' } as const, 'files' as Tab, { 
 const tick = atom({ plugin: 'filedeck', key: 'tick' } as const, 0, { shape: 'tick-1' })
 const query = atom({ plugin: 'filedeck', key: 'query' } as const, '', { shape: 'query-1' })
 const selection = atom({ plugin: 'filedeck', key: 'selection' } as const, '', { shape: 'selection-1' })
+// Where the open file's viewer sits: under its row in the tree, or in the Claude touched card.
+const selectionSite = atom({ plugin: 'filedeck', key: 'selectionSite' } as const, 'tree' as SelectionSite, { shape: 'site-1' })
 const previewMode = atom({ plugin: 'filedeck', key: 'previewMode' } as const, 'diff' as PreviewMode, { shape: 'mode-1' })
 const viewRoot = atom({ plugin: 'filedeck', key: 'viewRoot' } as const, '', { shape: 'view-1' })
+// Steps an animation while Claude reads or edits; still otherwise.
+const frame = atom({ plugin: 'filedeck', key: 'frame' } as const, 0, { shape: 'frame-1' })
+const follow = atom({ plugin: 'filedeck', key: 'follow' } as const, true, { shape: 'follow-1' })
 
 // Every file git knows of (tracked and untracked, ignores applied), for search.
 let allFiles: string[] = []
+
+// Folder listings, kept briefly so an animation frame doesn't list the tree again.
+const listings = new Map<string, { at: number; entries: FsEntry[] }>()
+async function listDir($: EngineInterface, dir: string): Promise<FsEntry[]> {
+  const hit = listings.get(dir)
+  if (hit && Date.now() - hit.at < 3000) return hit.entries
+  const entries = await $.fs.list(dir).catch(() => [])
+  listings.set(dir, { at: Date.now(), entries })
+  return entries
+}
 
 // ── look ─────────────────────────────────────────────────────────────────
 // Hues as in the reference: soft, slightly desaturated, readable on the dark
@@ -95,6 +110,10 @@ const solid = (body: string, color: string) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="${color}">${body}</svg>`
 const disc = (body: string, color: string) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><circle cx="24" cy="24" r="24" fill="${color}" fill-opacity="0.2"/><g transform="translate(12 12)" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${body}</g></svg>`
+
+// An icon that breathes while Claude is on a file (SMIL, drawn by the surface).
+const pulse = (body: string, color: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><g>${body}<animate attributeName="opacity" values="1;0.3;1" dur="1.1s" repeatCount="indefinite"/></g></svg>`
 
 // ── formatting ───────────────────────────────────────────────────────────
 
@@ -201,6 +220,7 @@ async function refreshGit($: EngineInterface): Promise<void> {
     return c ? { ...f, add: c[0], del: c[1] } : f
   })
   allFiles = (listed?.stdout ?? '').split('\n').filter(Boolean).slice(0, 20_000)
+  listings.clear()
   const ignoredList = (ignored?.stdout ?? '').split('\n').filter(Boolean).slice(0, 2000)
   await update($, git, () => ({ isRepo: true, root, ...parsed, files, ignored: ignoredList, at: Date.now() }))
 }
@@ -271,6 +291,30 @@ async function markTouch($: EngineInterface, path: string, kind: Touch['kind'], 
   })
 }
 
+// Open the tree to the file Claude is on: expand its folders, show the Files
+// tab, and scroll its row into view once it's drawn.
+async function followTo($: EngineInterface, path: string): Promise<void> {
+  if (!(await read($, follow))) return
+  const { root } = await read($, git)
+  const base = (await read($, viewRoot)) || root || (await $.session.cwd())
+  if (!path.startsWith(base + '/')) return
+  const dirs: string[] = []
+  for (let d = dirName(path); d.length > base.length; d = dirName(d)) dirs.push(d)
+  await update($, expanded, xs => (dirs.every(d => xs.includes(d)) ? xs : [...new Set([...xs, ...dirs])]))
+  if (!(await read($, query))) await update($, tab, t => (t === 'files' ? t : 'files'))
+  try {
+    $.clock.after(150, () => void $.ui.scroll({ to: { key: `row:${path}` }, in: PANE, block: 'center' }).catch(() => undefined))
+  } catch {
+    // No timer here (a test kit): the tree still opened.
+  }
+}
+
+// The shimmer a name runs through while Claude is on it.
+const SHIMMER: Record<Touch['kind'], string[]> = {
+  read: ['#b794f6', '#cdb4fa', '#e4d6fd', '#cdb4fa'],
+  edit: ['#f6a05a', '#f9bb85', '#fcd7b5', '#f9bb85'],
+}
+
 const GIT_VERB: Array<[RegExp, string]> = [
   [/\bgit\b[^|;&]*\bcommit\b/, 'Committing…'],
   [/\bgit\b[^|;&]*\bpush\b/, 'Pushing…'],
@@ -287,6 +331,7 @@ export const register: Register = on => {
     await $.command.register({ name: 'filedeck', description: 'Open the Filedeck pane: files, what Claude touched, and git' })
     void refreshGit($)
     $.clock.every(15_000, () => void refreshGit($))
+    $.clock.every(250, () => void read($, touched).then(list => (list.some(t => t.isActive) ? update($, frame, n => (n + 1) % 1200) : undefined)))
     void openPane($)
     return next(e)
   })
@@ -306,11 +351,15 @@ export const register: Register = on => {
 
     if (file && kind) {
       await markTouch($, file, kind, true)
+      await followTo($, file).catch(() => undefined)
       try {
         return await next(e)
       } finally {
         await markTouch($, file, kind, false)
-        if (kind === 'edit') void refreshGit($)
+        if (kind === 'edit') {
+          listings.delete(dirName(file))
+          void refreshGit($)
+        }
       }
     }
 
@@ -336,7 +385,7 @@ export const register: Register = on => {
     const Svg = 'Svg' in els ? els.Svg : undefined
     const isDesktop = e.surface !== 'terminal'
     const width = Math.max(30, e.props.bodyColumns ?? 60)
-    const [g, list, open, hidden, sizes, current, working, message, q, view, selected, mode] = await Promise.all([
+    const [g, list, open, hidden, sizes, current, working, message, q, view, selected, mode, step, following, site] = await Promise.all([
       read($, git),
       read($, touched),
       read($, expanded),
@@ -349,12 +398,23 @@ export const register: Register = on => {
       read($, viewRoot),
       read($, selection),
       read($, previewMode),
+      read($, frame),
+      read($, follow),
+      read($, selectionSite),
       read($, tick),
     ])
     const projectRoot = g.root || (await $.session.cwd())
     const root = view || projectRoot
     const changed = new Map(g.files.map(f => [f.path, f]))
     const activeByAbs = new Map(list.filter(t => t.isActive).map(t => [t.path, t]))
+    const touchedByAbs = new Map(list.map(t => [t.path, t.kind]))
+    // A folder's mark: edited if Claude edited anything under it, else read.
+    const touchedUnder = (abs: string): Touch['kind'] | undefined => {
+      let kind: Touch['kind'] | undefined
+      for (const t of list) if (t.path.startsWith(abs + '/')) kind = kind === 'edit' || t.kind === 'edit' ? 'edit' : 'read'
+      return kind
+    }
+    const activeUnder = (abs: string) => list.some(t => t.isActive && t.path.startsWith(abs + '/'))
     const now = list.find(t => t.isActive)
     const dirty = g.files.length
 
@@ -463,7 +523,10 @@ export const register: Register = on => {
       const act = activeByAbs.get(o.abs)
       const actColor = act ? (act.kind === 'read' ? C.read : C.edit) : undefined
       const gf = changed.get(rel)
-      const nameColor = actColor ?? (gf ? C.dirty : undefined)
+      const shade = act ? (SHIMMER[act.kind][step % 4] ?? actColor) : undefined
+      const nameColor = shade ?? (gf ? C.dirty : undefined)
+      const mark = o.isDir ? touchedUnder(o.abs) : touchedByAbs.get(o.abs)
+      const busyInside = o.isDir && !o.isOpen && activeUnder(o.abs)
       const dimDir = o.isDir && o.name.startsWith('.')
       const lead = (
         <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1} minWidth={0} overflow="hidden">
@@ -473,6 +536,7 @@ export const register: Register = on => {
           <Box flexShrink={1} minWidth={0} overflow="hidden">
             <Button key={`f:${o.abs}`} plain onPress={o.onPress}>
               <Text color={nameColor} weight={act || selected === o.abs ? 'semibold' : 'regular'} dimColor={dimDir} wrap="truncate-end">{o.name}</Text>
+              {mark && !act ? <Text color={mark === 'read' ? C.read : C.edit} dimColor={busyInside ? step % 2 === 0 : false}>{busyInside ? '  ●' : '  •'}</Text> : ''}
               {o.sub ? <Text dimColor wrap="truncate-end">{`  ${o.sub}`}</Text> : ''}
             </Button>
           </Box>
@@ -485,13 +549,14 @@ export const register: Register = on => {
           justifyContent="space-between"
           alignItems="center"
           paddingX={isDesktop ? 1 : 0}
-          backgroundColor={act ? tint(actColor ?? C.read, '2b') : selected === o.abs ? C.tileHover : isDesktop ? C.tile : undefined}
-          borderStyle={isDesktop && act ? 'round' : undefined}
-          borderColor={act ? actColor : undefined}
+          backgroundColor={act ? tint(actColor ?? C.read, step % 4 < 2 ? '2b' : '3d') : selected === o.abs ? C.tileHover : isDesktop ? C.tile : undefined}
           hover={{ backgroundColor: act ? tint(actColor ?? C.read, '3d') : C.tileHover }}
         >
           {lead}
-          <Box flexShrink={0} marginLeft={1}>{act ? pill(act.kind === 'read' ? 'reading' : 'editing', actColor ?? C.read) : o.right}</Box>
+          <Box flexShrink={0} marginLeft={1} flexDirection="row" alignItems="center" gap={1}>
+            {act && Svg ? <Svg source={pulse(act.kind === 'read' ? ICON.eye : ICON.pencil, actColor ?? C.read)} alt="" width={14} height={14} isInteractive /> : null}
+            {act ? pill(`${act.kind === 'read' ? 'reading' : 'editing'}${'.'.repeat(1 + (Math.floor(step / 2) % 3)).padEnd(3, ' ')}`, actColor ?? C.read) : o.right}
+          </Box>
         </Box>
       )
     }
@@ -508,8 +573,15 @@ export const register: Register = on => {
       }
       return <Text dimColor tabular>{sizes ? bytes(size) : when(mtimeMs)}</Text>
     }
-    function choose(abs: string) {
-      return () => void update($, selection, cur => (cur === abs ? '' : abs))
+    function choose(abs: string, where: SelectionSite = 'tree') {
+      return () => {
+        const again = selected === abs && site === where
+        void update($, selectionSite, () => where).then(() => update($, selection, () => (again ? '' : abs)))
+      }
+    }
+    // The viewer opens in one place only: where the file was clicked.
+    function openHere(abs: string, where: SelectionSite) {
+      return selected === abs && site === where
     }
 
     // The selected file, opened under its row: its diff when git has one,
@@ -578,27 +650,30 @@ export const register: Register = on => {
 
     // ── files tab ──
     async function filesView() {
+      const touchedRows: RenderChildren[] = []
+      for (const t of list.slice(0, 6)) {
+        const rel = relTo(projectRoot, t.path)
+        const color = t.kind === 'read' ? C.read : C.edit
+        touchedRows.push(
+          <Box key={`t:${t.path}`} flexDirection="row" justifyContent="space-between" alignItems="center" paddingX={isDesktop ? 1 : 0} backgroundColor={openHere(t.path, 'touched') ? C.tileHover : undefined}>
+            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0} overflow="hidden">
+              {badge(baseName(rel))}
+              <Box flexShrink={1} minWidth={0} overflow="hidden">
+                <Button key={`tb:${t.path}`} plain onPress={choose(t.path, 'touched')}>
+                  <Text weight="semibold" wrap="truncate-end" color={t.isActive ? SHIMMER[t.kind][step % 4] : undefined}>{baseName(rel)}</Text>
+                  <Text dimColor wrap="truncate-end">{`  ${shortDir(rel)}`}</Text>
+                </Button>
+              </Box>
+            </Box>
+            {t.isActive ? pill(t.kind === 'read' ? 'Reading' : 'Editing', color) : <Text color={color} size="footnote">{t.kind === 'read' ? 'Read' : 'Edited'}</Text>}
+          </Box>,
+        )
+        if (openHere(t.path, 'touched')) touchedRows.push(await preview(t.path, 0))
+      }
       const touchedCard = card('touched', [
         heading('Claude touched', `${list.length} file${list.length === 1 ? '' : 's'}`),
         ...(list.length
-          ? list.slice(0, 6).map(t => {
-              const rel = relTo(projectRoot, t.path)
-              const color = t.kind === 'read' ? C.read : C.edit
-              return (
-                <Box key={`t:${t.path}`} flexDirection="row" justifyContent="space-between" alignItems="center" paddingX={isDesktop ? 1 : 0}>
-                  <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0} overflow="hidden">
-                    {badge(baseName(rel))}
-                    <Box flexShrink={1} minWidth={0} overflow="hidden">
-                      <Button key={`tb:${t.path}`} plain onPress={insert(t.path)}>
-                        <Text weight="semibold" wrap="truncate-end">{baseName(rel)}</Text>
-                        <Text dimColor wrap="truncate-end">{`  ${shortDir(rel)}`}</Text>
-                      </Button>
-                    </Box>
-                  </Box>
-                  {t.isActive ? pill(t.kind === 'read' ? 'Reading' : 'Editing', color) : <Text color={color} size="footnote">{t.kind === 'read' ? 'Read' : 'Edited'}</Text>}
-                </Box>
-              )
-            })
+          ? touchedRows
           : [<Text dimColor>{'  Nothing yet'}</Text>]),
       ])
 
@@ -620,6 +695,7 @@ export const register: Register = on => {
           <Button key="up" onPress={() => void update($, viewRoot, () => dirName(root) || '/')}>Up a folder</Button>
           {root !== projectRoot ? <Button key="back" onPress={() => void update($, viewRoot, () => '')}>Back to project</Button> : null}
           <Button key="hidden" onPress={() => void update($, showHidden, v => !v)}>{hidden ? 'Hide hidden files' : 'Show hidden files'}</Button>
+          <Button key="follow" variant={following ? 'primary' : 'secondary'} onPress={() => void update($, follow, v => !v)}>{following ? 'Following Claude' : 'Follow Claude'}</Button>
         </Box>
       )
 
@@ -630,7 +706,7 @@ export const register: Register = on => {
         for (const rel of hits) {
           const abs = joinAbs(projectRoot, rel)
           rows.push(row({ abs, name: baseName(rel), depth: 0, isDir: false, sub: dirName(rel), right: <Text> </Text>, onPress: choose(abs) }))
-          if (selected === abs) rows.push(await preview(abs, 0))
+          if (openHere(abs, 'tree')) rows.push(await preview(abs, 0))
         }
         if (!hits.length) rows.push(<Text dimColor>{`  No file matches “${q.trim()}”`}</Text>)
       } else {
@@ -641,7 +717,7 @@ export const register: Register = on => {
           return rel === abs ? 0 : g.files.filter(f => f.path.startsWith(rel + '/')).length
         }
         const walk = async (dir: string, depth: number): Promise<void> => {
-          const entries = await $.fs.list(dir).catch(() => [])
+          const entries = await listDir($, dir)
           const visible = entries
             .filter(en => en.name !== '.DS_Store')
             .filter(en => hidden || !en.name.startsWith('.') || en.name === '.git')
@@ -668,7 +744,7 @@ export const register: Register = on => {
               if (isOpen) await walk(abs, depth + 1)
             } else {
               rows.push(row({ abs, name: en.name, depth, isDir: false, right: fileRight(abs, en.mtimeMs, en.size), onPress: choose(abs) }))
-              if (selected === abs) rows.push(await preview(abs, depth))
+              if (openHere(abs, 'tree')) rows.push(await preview(abs, depth))
             }
           }
         }
@@ -731,7 +807,7 @@ export const register: Register = on => {
         for (const f of fs) {
           out.push(changeRow(f, side))
           const abs = joinAbs(projectRoot, f.path)
-          if (selected === abs && !(side === 'unstaged' && staged.includes(f))) out.push(await preview(abs, 0))
+          if (openHere(abs, 'tree') && !(side === 'unstaged' && staged.includes(f))) out.push(await preview(abs, 0))
         }
         return out
       }

@@ -13,6 +13,7 @@ export type GitSnap = {
 }
 export type Tab = 'files' | 'changes'
 export type PreviewMode = 'diff' | 'file'
+export type SelectionSite = 'tree' | 'touched'
 
 declare module 'claude-code' {
   interface PluginState {
@@ -28,6 +29,9 @@ declare module 'claude-code' {
       tick: Shaped<number>
       query: Shaped<string>
       viewRoot: Shaped<string>
+      frame: Shaped<number>
+      follow: Shaped<boolean>
+      selectionSite: Shaped<SelectionSite>
       selection: Shaped<string>
       previewMode: Shaped<PreviewMode>
     }
