@@ -4,14 +4,16 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-CLAUDE="$HOME/.claude"
+# CLAUDE_CONFIG_DIR picks the folder to set up (claude-as sets it per profile).
+CLAUDE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$CLAUDE/backups" "$CLAUDE/skills" "$CLAUDE/mod-sources"
+mkdir -p "$CLAUDE/backups" "$CLAUDE/skills" "$HOME/.claude/mod-sources"
 
 command -v claude >/dev/null || { echo "Install Claude Code first: https://code.claude.com"; exit 1; }
 
 # 1. Sources some marketplaces are read from.
-PLAYGROUND="$CLAUDE/mod-sources/claude-code-playground"
+# Shared by every config folder: the settings name it under ~/.claude.
+PLAYGROUND="$HOME/.claude/mod-sources/claude-code-playground"
 if [ ! -d "$PLAYGROUND" ]; then
   git clone --depth 1 https://github.com/anthropics/claude-code-playground "$PLAYGROUND"
 fi
@@ -37,7 +39,7 @@ for key, value in mine.items():
 json.dump(current, open(target, 'w'), indent=2)
 open(target, 'a').write('\n')
 PY
-echo "✓ settings merged (backup in ~/.claude/backups)"
+echo "✓ settings merged into $CLAUDE/settings.json"
 
 # 3. Skills: link each one, so a git pull updates them.
 for dir in "$REPO"/skills/*/; do
