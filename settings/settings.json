@@ -10,7 +10,8 @@
     "terminal-browser@terminal-browser": true,
     "cc-plugin-you-should-know@builtin": true,
     "prismantis@prismantis": false,
-    "filedeck@ethan-claude": true
+    "filedeck@ethan-claude": true,
+    "savvy-flow@claude-kit": true
   },
   "extraKnownMarketplaces": {
     "claude-kit": {
