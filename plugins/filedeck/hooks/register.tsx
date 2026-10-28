@@ -331,6 +331,23 @@ const SHIMMER: Record<Touch['kind'], string[]> = {
   edit: ['#f6a05a', '#f9bb85', '#fcd7b5', '#f9bb85'],
 }
 
+// A read takes milliseconds: hold the reading or editing state a moment
+// after the tool finishes, so the eye can follow, unless Claude moved on.
+const LINGER_MS = 2000
+function settle($: EngineInterface, path: string, kind: Touch['kind']): void {
+  const done = () => void markTouch($, path, kind, false)
+  try {
+    $.clock.after(LINGER_MS, () => {
+      void read($, touched).then(list => {
+        const t = list.find(x => x.path === path)
+        if (t?.isActive && Date.now() - t.at >= LINGER_MS - 100) done()
+      })
+    })
+  } catch {
+    done()
+  }
+}
+
 const GIT_VERB: Array<[RegExp, string]> = [
   [/\bgit\b[^|;&]*\bcommit\b/, 'Committing…'],
   [/\bgit\b[^|;&]*\bpush\b/, 'Pushing…'],
@@ -371,7 +388,7 @@ export const register: Register = on => {
       try {
         return await next(e)
       } finally {
-        await markTouch($, file, kind, false)
+        settle($, file, kind)
         if (kind === 'edit') {
           listings.delete(dirName(file))
           void refreshGit($)
