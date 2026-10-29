@@ -60,6 +60,8 @@ export type InputSpec = {
   options: string[]
   accept: string[]
   multiple: boolean
+  /** Select inputs: offer the values used in earlier runs as well as `options`, and take new ones. */
+  remember: boolean
   /** Folder inputs: files the folder must hold (e.g. package.json); the hub finds folders that do. */
   contains: string[]
   default: string

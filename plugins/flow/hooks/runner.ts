@@ -8,6 +8,7 @@ import type { EngineInterface, ProcessSpawnResult, Register, Timer, TurnComplete
 
 import type { Found, ItemRun, Layout, LayoutGroup, Run, RunStatus, StepRun, StepSpec, StepStatus, Tier, Workflow } from '../types'
 import { LAYOUT_FILE, layoutYaml, parseLayout } from './layout'
+import { rememberValues } from './file-finder'
 import {
   WORK_KINDS,
   checksStatus,
@@ -1485,6 +1486,10 @@ export async function startRun(
     }
   }
   if (problems.length) return { problems }
+  // A remembered select keeps what this run used, for the next run's form.
+  for (const input of wf.inputs)
+    if (input.type === 'select' && input.remember)
+      await rememberValues($, wf.id, input.id, (values[input.id] ?? '').split('\n').map(v => v.trim()).filter(Boolean)).catch(() => undefined)
 
   const id = await newRunId($)
   const run: Run = {

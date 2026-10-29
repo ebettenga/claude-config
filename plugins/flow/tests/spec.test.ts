@@ -91,7 +91,7 @@ steps:
 `)
     expect(inputs).toContain('inputs[0].id: "1bad" must be letters, digits or _')
     expect(inputs).toContain('inputs[1].type: "colour" must be one of text, textarea, number, boolean, date, select, file, folder')
-    expect(inputs).toContain('inputs[2].options: a select needs at least one option')
+    expect(inputs).toContain('inputs[2].options: a select needs at least one option (or remember: true, to offer the values used before)')
     expect(inputs).toContain('inputs[3].id: "pick" is used twice')
 
     const steps = errorsOf(`
@@ -196,7 +196,7 @@ describe('inputProblems', () => {
       'Name is required',
       'Count must be a number',
       'Day must be a date (YYYY-MM-DD)',
-      'Size must be one of s, m',
+      'Size: "xl" must be one of s, m',
       'Sheet: b.txt is not .csv',
       'Sheets: 2.tsv is not .csv',
     ])
@@ -687,4 +687,16 @@ test('flows.yaml edits: move, regroup, add, rename, reorder and remove', () => {
   expect(g[1]?.workflows).toEqual(['gone'])
   g = removeGroup(g, 'Bee')
   expect(g.map(x => x.title)).toEqual(['A'])
+})
+
+test('select inputs: multiple takes several values, remember takes new ones', () => {
+  const ok = parse('title: T\ninputs:\n  - id: to\n    type: select\n    multiple: true\n    remember: true\n    default: [a@x.com, b@x.com]\nsteps:\n  - id: s\n    run: echo\n')
+  expect(ok.errors).toEqual([])
+  const to = ok.workflow?.inputs[0]
+  expect(to).toMatchObject({ multiple: true, remember: true, default: 'a@x.com\nb@x.com' })
+  expect(to && defaultValue(to)).toBe('a@x.com\nb@x.com')
+  expect(inputProblems(ok.workflow as Workflow, { to: 'new@y.com\na@x.com' })).toEqual([])
+  const fixed = parse('title: T\ninputs:\n  - id: c\n    type: select\n    multiple: true\n    options: [red, blue]\n  - id: t\n    type: text\n    remember: true\nsteps:\n  - id: s\n    run: echo\n')
+  expect(fixed.errors).toContain('inputs[1].remember: only select inputs take remember:')
+  expect(inputProblems(fixed.workflow as Workflow, { c: 'red\ngreen', t: 'x' })).toEqual(['c: "green" must be one of red, blue'])
 })

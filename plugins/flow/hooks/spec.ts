@@ -186,7 +186,10 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
       const type = (str(raw.type) || 'text') as InputType
       if (!INPUT_TYPES.includes(type)) errors.push(`${at}.type: "${type}" must be one of ${INPUT_TYPES.join(', ')}`)
       const options = strList(raw.options)
-      if (type === 'select' && !options.length) errors.push(`${at}.options: a select needs at least one option`)
+      const remember = raw.remember === true
+      if (raw.remember !== undefined && type !== 'select') errors.push(`${at}.remember: only select inputs take remember:`)
+      if (raw.multiple !== undefined && type !== 'select' && type !== 'file') errors.push(`${at}.multiple: only select and file inputs take multiple:`)
+      if (type === 'select' && !options.length && !remember) errors.push(`${at}.options: a select needs at least one option (or remember: true, to offer the values used before)`)
       const contains = strList(raw.contains)
       if (contains.length && type !== 'folder') errors.push(`${at}.contains: only folder inputs take contains:`)
       if (contains.some(c => c.startsWith('/') || c.split('/').includes('..'))) errors.push(`${at}.contains: paths are relative to the folder (no leading / or ..)`)
@@ -198,7 +201,9 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
         accept: strList(raw.accept).map(a => a.toLowerCase()),
         multiple: raw.multiple === true,
         contains,
-        default: raw.default === undefined || raw.default === null ? '' : str(raw.default),
+        // A multiple select's default may be a list: its values, one per line.
+        default: raw.default === undefined || raw.default === null ? '' : Array.isArray(raw.default) ? strList(raw.default).join('\n') : str(raw.default),
+        remember,
         required: raw.required !== false,
         help: str(raw.help),
       })
@@ -917,7 +922,8 @@ const isoDay = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2
 /** An input's starting value: its default, with date words (today, yesterday, last-monday) resolved. */
 export function defaultValue(input: InputSpec, now = new Date()): string {
   if (input.type === 'boolean') return input.default === 'true' ? 'true' : 'false'
-  if (input.type === 'select') return input.options.includes(input.default) ? input.default : input.options[0] ?? ''
+  if (input.type === 'select' && input.multiple) return input.default
+  if (input.type === 'select') return input.options.includes(input.default) || input.remember ? input.default || (input.options[0] ?? '') : input.options[0] ?? ''
   if (input.type !== 'date') return input.default
   const d = new Date(now)
   if (input.default === 'today') return isoDay(d)
@@ -942,7 +948,11 @@ export function inputProblems(wf: Workflow, values: Record<string, string>): str
     }
     if (input.type === 'number' && !Number.isFinite(Number(value))) problems.push(`${input.label} must be a number`)
     if (input.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(value)) problems.push(`${input.label} must be a date (YYYY-MM-DD)`)
-    if (input.type === 'select' && !input.options.includes(value)) problems.push(`${input.label} must be one of ${input.options.join(', ')}`)
+    if (input.type === 'select' && !input.remember) {
+      // A remembered select takes new values too; a fixed one only its options.
+      const picked = input.multiple ? value.split('\n').map(v => v.trim()).filter(Boolean) : [value]
+      for (const v of picked) if (!input.options.includes(v)) problems.push(`${input.label}: "${v}" must be one of ${input.options.join(', ')}`)
+    }
     if (input.type === 'file' && input.accept.length) {
       const files = input.multiple ? value.split('\n').filter(Boolean) : [value]
       for (const f of files)

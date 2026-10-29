@@ -137,3 +137,19 @@ export async function rememberPick($: EngineInterface, workflowId: string, input
   const prior = Array.isArray(stored) ? stored.filter((p): p is string => typeof p === 'string' && p !== path) : []
   await $.store.set(key, [path, ...prior].slice(0, 8)).catch(() => undefined)
 }
+
+const valuesKey = (workflowId: string, inputId: string) => `values:${workflowId}:${inputId}`
+
+/** The values a remembered select was run with before, most recent first (at most 30). */
+export async function rememberedValues($: EngineInterface, workflowId: string, inputId: string): Promise<string[]> {
+  const stored = await $.store.get(valuesKey(workflowId, inputId)).catch(() => undefined)
+  return Array.isArray(stored) ? stored.filter((v): v is string => typeof v === 'string') : []
+}
+
+/** Puts these values first in what the input remembers. */
+export async function rememberValues($: EngineInterface, workflowId: string, inputId: string, values: string[]): Promise<void> {
+  if (!values.length) return
+  const prior = (await rememberedValues($, workflowId, inputId)).filter(v => !values.includes(v))
+  await $.store.set(valuesKey(workflowId, inputId), [...values, ...prior].slice(0, 30)).catch(() => undefined)
+}
+

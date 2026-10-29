@@ -10,7 +10,7 @@ import type { ChartData, Found, HubAttempts, HubCatalog, HubEnv, HubForms, HubOp
 import { LOGO_TEXT_PARTS, logoSvg } from './brand'
 import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
 import type { Table } from './charts'
-import { findFolders, findOnMac, pastPicks, recentRunFiles, rememberPick, type SuggestedFile } from './file-finder'
+import { findFolders, findOnMac, pastPicks, recentRunFiles, rememberPick, rememberedValues, type SuggestedFile } from './file-finder'
 import {
   C,
   ICON,
@@ -677,12 +677,49 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         case 'folder':
           return input.type
         case 'select':
-          return 'pick one'
+          return input.multiple ? 'pick any' : 'pick one'
         case 'file':
           return [input.multiple ? 'files' : 'file', input.accept.join(' ')].filter(Boolean).join(' · ')
         default:
           return ''
       }
+    }
+
+    /**
+     * A select that takes several values, or remembers them: a toggle per value
+     * (its options, then what earlier runs used, then what is picked now) and a
+     * field to add one. The value is the picked ones, one per line.
+     */
+    async function pickMany(wf: Workflow, input: InputSpec, value: string) {
+      const picked = value.split('\n').map(v => v.trim()).filter(Boolean)
+      const used = input.remember ? await rememberedValues($, wf.id, input.id) : []
+      const choices = [...new Set([...input.options, ...used, ...picked])]
+      const toggle = (v: string) =>
+        void setValue(wf, input.id, input.multiple ? (picked.includes(v) ? picked.filter(x => x !== v) : [...picked, v]).join('\n') : picked.includes(v) ? '' : v)
+      const add = (raw: string) => {
+        const v = raw.trim()
+        if (!v) return
+        void setValue(wf, input.id, input.multiple ? [...picked.filter(x => x !== v), v].join('\n') : v)
+      }
+      return (
+        <Box flexDirection="column" gap="xs">
+          {choices.length
+            ? (
+                <Box flexDirection="row" gap={1} flexWrap="wrap">
+                  {choices.map(v => (
+                    <Button key={`opt:${wf.id}:${input.id}:${v}`} variant={picked.includes(v) ? 'primary' : 'secondary'} onPress={() => toggle(v)}>
+                      {`${picked.includes(v) ? '✓ ' : ''}${v}`}
+                    </Button>
+                  ))}
+                </Box>
+              )
+            : <Text dimColor size="footnote">Nothing used yet: add one below.</Text>}
+          {Input
+            ? <Input key={`add:${wf.id}:${input.id}`} value="" placeholder={input.multiple ? 'Add another, press Enter' : 'Or type one, press Enter'} onSubmit={add} />
+            : null}
+          {input.remember && used.length ? <Text dimColor size="caption">{`Remembers what each run uses · ${plural(used.length, 'saved value')}`}</Text> : null}
+        </Box>
+      )
     }
 
     async function field(f: Found & { workflow: Workflow }, input: InputSpec) {
@@ -701,6 +738,10 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           )
           break
         case 'select':
+          if (input.multiple || input.remember) {
+            control = await pickMany(wf, input, value)
+            break
+          }
           if (input.options.length <= 6 || !Select)
             control = (
               <Box flexDirection="row" gap={1} flexWrap="wrap">
