@@ -293,6 +293,25 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
 
     // ── atoms of the look ──
 
+    // The loading state: flow's mark, pulsing, over a dim line, centred and padded. A page's is
+    // larger and roomier than a section's; the terminal has the line alone.
+    function loading(key: string, label = 'Loading…', where: 'page' | 'section' = 'section') {
+      const isPage = where === 'page'
+      if (!isDesktop)
+        return (
+          <Box key={key} justifyContent="center" paddingY={isPage ? 'xl' : 'md'}>
+            <Text dimColor>{label}</Text>
+          </Box>
+        )
+      const size = isPage ? 40 : 24
+      return (
+        <Box key={key} flexDirection="column" alignItems="center" justifyContent="center" gap="sm" paddingY={isPage ? 'xl' : 'md'} width="100%">
+          {Svg ? <Svg source={logoSvg(size, undefined, true)} alt="" width={size} height={size} /> : null}
+          <Text dimColor size="footnote">{label}</Text>
+        </Box>
+      )
+    }
+
     function card(key: string, children: RenderChildren[], look: { fill?: string; stroke?: string } = {}) {
       return (
         <Box
@@ -502,7 +521,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const rows: RenderChildren[] = []
       let status: RenderChildren = null
       let pager: RenderChildren = null
-      if (!list || list.state === 'loading') status = <Text key="vst" dimColor>Looking…</Text>
+      if (!list || list.state === 'loading') status = loading('vst', 'Looking…', 'page')
       else if (list.state === 'error') status = <Text key="vst" color={C.del} wrap="wrap">{list.message}</Text>
       else {
         const { items, total } = list.value as { items: unknown[]; total: number }
@@ -622,7 +641,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     function sectionCard(view: ViewSpec, st: ViewState, sec: ViewSection, sk: string, ctx: Record<string, unknown>) {
       const part = sec.from ? st.detail[sec.from] : undefined
       const parts: RenderChildren[] = [<Text key={`sh:${sk}`} size="footnote" weight="bold" dimColor>{sec.title.toUpperCase()}</Text>]
-      if (part?.state === 'loading') parts.push(<Text key={`sl:${sk}`} dimColor>Loading…</Text>)
+      if (part?.state === 'loading') parts.push(loading(`sl:${sk}`))
       else if (part?.state === 'error') parts.push(<Text key={`se:${sk}`} color={C.del} wrap="wrap">{part.message}</Text>)
       else {
         if (sec.stats.length)
@@ -1907,10 +1926,10 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const use = (text: string) => () => fillPrompt(text)
       type Row = { key: string; name: string; description: string; onPress: () => void }
       // Each section folds shut from its title line (this viewer's, kept for the session).
-      const group = (title: string, color: string, kind: string, label: string, items: Row[], wait = false) => {
+      const group = (title: string, color: string, kind: string, label: string, items: Row[]) => {
         const foldKey = `skills:${title}`
         const isFolded = folded[foldKey] === true
-        const count = wait ? '' : String(items.length)
+        const count = String(items.length)
         const head = (
           <Box flexDirection="row" alignItems="center" gap={1}>
             <Box flexGrow={1} flexShrink={1} minWidth={0}>
@@ -1935,7 +1954,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
                     sub: it.description,
                   }),
                 )
-              : [<Text dimColor size="footnote">{wait ? 'Looking…' : 'None found'}</Text>]),
+              : [<Text dimColor size="footnote">None found</Text>]),
         ])
       }
       const serverRow = (m: { name: string; tools: string[] }): Row => ({
@@ -1947,9 +1966,13 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       return [
         heading('Everything Claude can use', isLoading ? '' : String(total)),
         group('Workflows', C.blue, 'workflow', 'Open', loaded.map(f => ({ key: `wf:${f.id}`, name: f.workflow.title, description: firstSentence(f.workflow.description), onPress: () => void showWorkflow($, f.id) }))),
-        group('Skills', C.add, 'skill', 'Use', catalog.skills.map(s => ({ key: `skill:${s.name}`, name: s.name, description: s.description, onPress: use(s.fill) })), isLoading),
-        group('Agents', C.read, 'agent', 'Use', catalog.agents.map(a => ({ key: `agent:${a.name}`, name: a.name, description: a.description, onPress: use(a.fill) })), isLoading),
-        group('MCP servers', C.teal, 'mcp', 'Use', servers.map(serverRow), isLoading),
+        ...(isLoading
+          ? [loading('skills:loading', 'Reading skills, agents and MCP servers…', 'page')]
+          : [
+              group('Skills', C.add, 'skill', 'Use', catalog.skills.map(s => ({ key: `skill:${s.name}`, name: s.name, description: s.description, onPress: use(s.fill) }))),
+              group('Agents', C.read, 'agent', 'Use', catalog.agents.map(a => ({ key: `agent:${a.name}`, name: a.name, description: a.description, onPress: use(a.fill) }))),
+              group('MCP servers', C.teal, 'mcp', 'Use', servers.map(serverRow)),
+            ]),
       ]
     }
   })
