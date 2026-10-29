@@ -173,6 +173,9 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
       if (!INPUT_TYPES.includes(type)) errors.push(`${at}.type: "${type}" must be one of ${INPUT_TYPES.join(', ')}`)
       const options = strList(raw.options)
       if (type === 'select' && !options.length) errors.push(`${at}.options: a select needs at least one option`)
+      const contains = strList(raw.contains)
+      if (contains.length && type !== 'folder') errors.push(`${at}.contains: only folder inputs take contains:`)
+      if (contains.some(c => c.startsWith('/') || c.split('/').includes('..'))) errors.push(`${at}.contains: paths are relative to the folder (no leading / or ..)`)
       inputs.push({
         id: inId,
         label: str(raw.label) || inId,
@@ -180,6 +183,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
         options,
         accept: strList(raw.accept).map(a => a.toLowerCase()),
         multiple: raw.multiple === true,
+        contains,
         default: raw.default === undefined || raw.default === null ? '' : str(raw.default),
         required: raw.required !== false,
         help: str(raw.help),

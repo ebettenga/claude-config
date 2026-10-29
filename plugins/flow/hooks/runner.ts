@@ -1256,7 +1256,14 @@ export async function startRun(
   for (const input of wf.inputs) {
     if ((input.type !== 'file' && input.type !== 'folder') || !values[input.id]?.trim()) continue
     const paths = input.multiple ? (values[input.id] ?? '').split('\n').map(p => p.trim()).filter(Boolean) : [(values[input.id] ?? '').trim()]
-    for (const path of paths) if (!(await $.fs.exists(path).catch(() => false))) problems.push(`${input.label}: ${path} does not exist`)
+    for (const path of paths) {
+      if (!(await $.fs.exists(path).catch(() => false))) {
+        problems.push(`${input.label}: ${path} does not exist`)
+        continue
+      }
+      for (const rel of input.type === 'folder' ? input.contains ?? [] : [])
+        if (!(await $.fs.exists(`${path.replace(/\/+$/, '')}/${rel}`).catch(() => false))) problems.push(`${input.label}: ${path} has no ${rel}`)
+    }
   }
   if (problems.length) return { problems }
 

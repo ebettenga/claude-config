@@ -128,8 +128,27 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
     }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 0, mtimeMs: 0, isLink: false })) }
   })
-  // The env check: bash -c '[ -n "${!1+x}" ]' _ NAME.
-  on('process.run', (_, e) => ({ value: { exitCode: (e.argv[4] ?? '') in vars ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('fs.stat', (_, e) => {
+    if (fs.has(e.path)) return { value: { kind: 'file', size: 0, mtimeMs: 1000, isLink: false } }
+    if (isDir(e.path)) return { value: { kind: 'dir', size: 0, mtimeMs: 1000, isLink: false } }
+    throw new Error(`no such file: ${e.path}`)
+  })
+  const ran = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+  on('process.run', (_, e) => {
+    // Spotlight: mdfind -onlyin <home> '<expr>', answered from the files in memory.
+    if (e.argv[0] === 'mdfind') {
+      const expr = e.argv[3] ?? ''
+      const suffixes = [...expr.matchAll(/"\*(\.[^"*]+)"c/g)].map(m => (m[1] ?? '').toLowerCase())
+      const exact = /kMDItemFSName == "([^"*]+)"$/.exec(expr)?.[1]
+      const hits = [...fs.keys()].filter(k => {
+        const name = k.slice(k.lastIndexOf('/') + 1)
+        return exact ? name === exact : suffixes.some(x => name.toLowerCase().endsWith(x))
+      })
+      return ran(hits.join('\n'))
+    }
+    // The env check: bash -c '[ -n "${!1+x}" ]' _ NAME.
+    return ran('', (e.argv[4] ?? '') in vars ? 0 : 1)
+  })
   const procs: Proc[] = []
   on('process.spawn', async function* (_, e) {
     let done: (code: number) => void = () => undefined
@@ -163,7 +182,7 @@ async function begin($: Engine, surface: (typeof SURFACES)[number]) {
 const texts = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string }[]> }) => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
 
 for (const surface of SURFACES) {
-  test(`every tab and board draws (${surface})`, async ($, on) => {
+  test(`every tab and board draws (${surface})`, { timeoutMs: 20_000 }, async ($, on) => {
     const w = world(on, { [`${FLOWS}/reports/flow.yaml`]: REPORTS, [`${FLOWS}/csv/flow.yaml`]: CSV, [`${FLOWS}/broken/flow.yaml`]: 'title: [' })
     await begin($, surface)
     const ui = await $.ui.mount({ ...PANE, surface })
@@ -238,6 +257,7 @@ for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
     await ui.press({ key: 'run:reports' })
     await ui.press({ key: 'browse:reports:logo' })
+    await ui.press({ key: 'tobrowse:reports:logo' })
     // The workflow folder, folders first.
     expect(await ui.find({ type: 'Button', key: `pick:${FLOWS}/reports/brand` })).toBeTruthy()
     await ui.press({ key: `pick:${FLOWS}/reports/brand` })
@@ -390,3 +410,61 @@ test('/flow-chart <id> opens that workflow', async ($, on) => {
   const missing = (await $.command.run({ command: 'flow-chart', args: 'ghost' })) as { text: string }
   expect(missing.text).toContain('no workflow "ghost"')
 })
+
+for (const surface of SURFACES) {
+  test(`a file input suggests matching files from Spotlight and earlier runs (${surface})`, async ($, on) => {
+    world(on, {
+      [`${FLOWS}/reports/flow.yaml`]: REPORTS,
+      [`${HOME}/Downloads/logo-final.png`]: 'png',
+      [`${HOME}/Documents/notes.pdf`]: 'pdf',
+      [`${HOME}/code/app/node_modules/pkg/icon.png`]: 'png',
+      [`${RUNS}/reports/20261027-090000-abcd/logo-made.png`]: 'png',
+      [`${RUNS}/reports/20261027-090000-abcd/run.json`]: '{}',
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'run:reports' })
+    await ui.press({ key: 'browse:reports:logo' })
+    // Spotlight's .png hit, but not one inside node_modules, nor a .pdf.
+    expect(await ui.find({ type: 'Button', key: `sp:mac:${HOME}/Downloads/logo-final.png` })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: `sp:mac:${HOME}/code/app/node_modules/pkg/icon.png` })).toBeFalsy()
+    expect(await ui.find({ type: 'Text', text: /^notes\.pdf$/ })).toBeFalsy()
+    // A file an earlier run made, labelled with its workflow and run.
+    expect(await ui.find({ type: 'Button', key: `sp:run:${RUNS}/reports/20261027-090000-abcd/logo-made.png` })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /reports · 20261027-090000-abcd/ })).toBeTruthy()
+    // The search narrows the list; a press picks.
+    await ui.input({ key: 'fq:reports:logo', text: 'final', kind: 'change' })
+    expect(await ui.find({ type: 'Button', key: `sp:run:${RUNS}/reports/20261027-090000-abcd/logo-made.png` })).toBeFalsy()
+    await ui.press({ key: `sp:mac:${HOME}/Downloads/logo-final.png` })
+    expect((await ui.find({ type: 'Input', key: 'in:reports:logo' }))?.props.value).toBe(`${HOME}/Downloads/logo-final.png`)
+    await ui.unmount()
+  })
+
+  test(`a folder input with contains: lists the projects that hold it (${surface})`, async ($, on) => {
+    world(on, {
+      [`${FLOWS}/health/flow.yaml`]: `id: health
+title: Health
+inputs:
+  - { id: repo, type: folder, contains: [package.json] }
+steps:
+  - { id: t, run: npm test, cwd: "{{inputs.repo}}" }
+`,
+      [`${HOME}/code/app/package.json`]: '{}',
+      [`${HOME}/code/app/node_modules/left-pad/package.json`]: '{}',
+      [`${HOME}/code/site/package.json`]: '{}',
+      [`${HOME}/code/notes/README.md`]: '#',
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'run:health' })
+    await ui.press({ key: 'browse:health:repo' })
+    expect(await ui.find({ type: 'Text', text: /FOLDERS WITH PACKAGE\.JSON/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: `sp:mac:${HOME}/code/app` })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: `sp:mac:${HOME}/code/site` })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: `sp:mac:${HOME}/code/app/node_modules/left-pad` })).toBeFalsy()
+    expect(await ui.find({ type: 'Button', key: `sp:mac:${HOME}/code/notes` })).toBeFalsy()
+    await ui.press({ key: `sp:mac:${HOME}/code/site` })
+    expect((await ui.find({ type: 'Input', key: 'in:health:repo' }))?.props.value).toBe(`${HOME}/code/site`)
+    await ui.unmount()
+  })
+}

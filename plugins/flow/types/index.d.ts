@@ -60,6 +60,8 @@ export type InputSpec = {
   options: string[]
   accept: string[]
   multiple: boolean
+  /** Folder inputs: files the folder must hold (e.g. package.json); the hub finds folders that do. */
+  contains: string[]
   default: string
   required: boolean
   help: string
@@ -223,7 +225,8 @@ export type Run = {
 export type HubTab = 'workflows' | 'runs' | 'skills'
 
 /** The inline file browser under a file or folder input. */
-export type HubPicker = { workflowId: string; inputId: string; dir: string }
+/** The open file chooser: suggestions (with a search) or the folder browser. */
+export type HubPicker = { workflowId: string; inputId: string; dir: string; mode: 'suggest' | 'browse'; query: string }
 
 /** A skill or agent Claude can use, as the Skills tab lists it. */
 export type CatalogItem = {

@@ -7,6 +7,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Found, HubAttempts, HubCatalog, HubEnv, HubForms, HubPicker, HubTab, InputSpec, Run, StepSpec, Workflow } from '../types'
+import { findFolders, findOnMac, pastPicks, recentRunFiles, rememberPick, type SuggestedFile } from './file-finder'
 import {
   C,
   ICON,
@@ -64,7 +65,7 @@ const hubTab = atom({ plugin: 'flow', key: 'hubTab' } as const, 'workflows' as H
 const hubWorkflow = atom({ plugin: 'flow', key: 'hubWorkflow' } as const, '', { shape: 'hub-workflow-1' })
 const hubRun = atom({ plugin: 'flow', key: 'hubRun' } as const, '', { shape: 'hub-run-1' })
 const hubForms = atom({ plugin: 'flow', key: 'hubForms' } as const, {} as HubForms, { shape: 'hub-forms-1' })
-const hubPicker = atom({ plugin: 'flow', key: 'hubPicker' } as const, null as HubPicker | null, { shape: 'hub-picker-1' })
+const hubPicker = atom({ plugin: 'flow', key: 'hubPicker' } as const, null as HubPicker | null, { shape: 'hub-picker-2' })
 const hubQuery = atom({ plugin: 'flow', key: 'hubQuery' } as const, '', { shape: 'hub-query-1' })
 const hubLogStep = atom({ plugin: 'flow', key: 'hubLogStep' } as const, '', { shape: 'hub-log-1' })
 const hubFrame = atom({ plugin: 'flow', key: 'hubFrame' } as const, 0, { shape: 'hub-frame-1' })
@@ -492,9 +493,9 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
                     ? <Input key={key} value={value} placeholder={input.type === 'folder' ? 'A folder' : 'A file'} {...(input.multiple ? { rows: 3 } : {})} onInput={(v: string) => void setValue(wf, input.id, v)} onSubmit={(v: string) => void setValue(wf, input.id, v)} />
                     : <Text>{value || '—'}</Text>}
                 </Box>
-                <Button key={`browse:${wf.id}:${input.id}`} onPress={() => void browse(f, input, value, isOpen)}>{isOpen ? 'Done' : 'Browse'}</Button>
+                <Button key={`browse:${wf.id}:${input.id}`} onPress={() => void browse(f, input, value, isOpen)}>{isOpen ? 'Done' : 'Choose…'}</Button>
               </Box>
-              {isOpen && picked ? await picker(wf, input, value, picked.dir) : null}
+              {isOpen && picked ? (picked.mode === 'browse' ? await picker(wf, input, value, picked.dir) : await suggestions(f, input, value, picked.query)) : null}
             </Box>
           )
           break
@@ -527,7 +528,75 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         const candidate = input.type === 'folder' && !input.multiple ? first : dirName(first)
         if (candidate && (await $.fs.exists(candidate).catch(() => false))) dir = candidate
       }
-      await update($, hubPicker, () => ({ workflowId: f.workflow.id, inputId: input.id, dir }))
+      // Folders are found by browsing; files start from the suggestions.
+      await update($, hubPicker, () => ({ workflowId: f.workflow.id, inputId: input.id, dir, mode: input.type === 'folder' && !input.contains?.length ? ('browse' as const) : ('suggest' as const), query: '' }))
+    }
+
+    function choose(wf: Workflow, input: InputSpec, value: string, abs: string) {
+      void rememberPick($, wf.id, input.id, abs)
+      if (!input.multiple) return setValue(wf, input.id, abs)
+      const chosen = value.split('\n').map(v => expandHome(v.trim(), home)).filter(Boolean)
+      const next = chosen.includes(abs) ? chosen.filter(c => c !== abs) : [...chosen, abs]
+      return setValue(wf, input.id, next.join('\n'))
+    }
+
+    // Files that fit the input without clicking through folders: past picks,
+    // what earlier runs made, then Spotlight's hits, each filtered by the search text.
+    async function suggestions(f: Found & { workflow: Workflow }, input: InputSpec, value: string, query: string) {
+      const wf = f.workflow
+      const accept = input.accept
+      const isFolder = input.type === 'folder'
+      const contains = input.contains ?? []
+      const [picks, fromRuns, onMac] = await Promise.all([
+        pastPicks($, wf.id, input.id, accept, query, isFolder),
+        isFolder ? Promise.resolve([]) : recentRunFiles($, home, accept, query),
+        isFolder ? findFolders($, home, contains, query) : findOnMac($, home, accept, query),
+      ])
+      const seen = new Set<string>()
+      const fresh = (list: SuggestedFile[]) => list.filter(x => !seen.has(x.path) && seen.add(x.path))
+      const groups: Array<[string, SuggestedFile[]]> = [
+        ['Picked before', fresh(picks)],
+        ['From recent runs', fresh(fromRuns)],
+        [isFolder ? `Folders with ${contains.join(' + ')}` : accept.length ? `On this Mac · ${accept.join(' ')}` : 'On this Mac', fresh(onMac)],
+      ]
+      const chosen = value.split('\n').map(v => expandHome(v.trim(), home)).filter(Boolean)
+      const row = (file: SuggestedFile) => {
+        const name = baseName(file.path)
+        const isChosen = chosen.includes(file.path)
+        const where = file.label ?? tildify(dirName(file.path), home)
+        const icon = fileIcon(name, Boolean(file.isDir))
+        return (
+          <Box key={`sg:${file.source}:${file.path}`} flexDirection="row" alignItems="center" gap={1} paddingX={isDesktop ? 1 : 0} backgroundColor={isDesktop && isChosen ? tint(C.blue) : undefined}>
+            {icon}
+            <Box flexShrink={1} minWidth={0} overflow="hidden" flexGrow={1}>
+              <Button key={`sp:${file.source}:${file.path}`} plain onPress={() => void choose(wf, input, value, file.path)}>
+                <Text weight={isChosen ? 'semibold' : 'medium'} wrap="truncate-end">{`${isChosen && !isDesktop ? '✓ ' : ''}${name}`}</Text>
+                <Text dimColor size="footnote" wrap="truncate-start">{`  ${where}`}</Text>
+              </Button>
+            </Box>
+            <Box flexShrink={0}><Text dimColor size="footnote">{file.mtimeMs ? ago(file.mtimeMs, now) : ''}</Text></Box>
+          </Box>
+        )
+      }
+      const body: RenderChildren[] = []
+      for (const [title, files] of groups) {
+        if (!files.length) continue
+        body.push(<Text key={`sgh:${title}`} dimColor size="caption" weight="bold">{title.toUpperCase()}</Text>)
+        body.push(...files.map(row))
+      }
+      if (!body.length)
+        body.push(<Text dimColor size="footnote">{query ? `No ${isFolder ? 'folder' : accept.join(' or ') || 'file'} matches “${query}”. Try Browse folders.` : 'Nothing found yet. Try Browse folders.'}</Text>)
+      return (
+        <Box key={`suggest:${input.id}`} flexDirection="column" borderStyle="round" borderColor={isDesktop ? C.border : 'gray'} backgroundColor={isDesktop ? C.field : undefined} paddingX={1} gap="xs">
+          {Input
+            ? <Input key={`fq:${wf.id}:${input.id}`} value={query} placeholder={isFolder ? 'Search projects by name' : `Search ${accept.join(' ') || 'files'} by name`} onInput={(v: string) => void update($, hubPicker, p => (p ? { ...p, query: v } : p))} onSubmit={(v: string) => void update($, hubPicker, p => (p ? { ...p, query: v } : p))} />
+            : null}
+          {body}
+          <Box flexDirection="row" paddingTop="xs">
+            <Button key={`tobrowse:${wf.id}:${input.id}`} onPress={() => void update($, hubPicker, p => (p ? { ...p, mode: 'browse' as const } : p))}>Browse folders</Button>
+          </Box>
+        </Box>
+      )
     }
 
     async function picker(wf: Workflow, input: InputSpec, value: string, dir: string) {
@@ -536,11 +605,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         .sort((a, b) => ((a.kind === 'dir') === (b.kind === 'dir') ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1))
       const chosen = value.split('\n').map(v => expandHome(v.trim(), home)).filter(Boolean)
       const join = (name: string) => (dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`)
-      const pick = (abs: string) => {
-        if (!input.multiple) return setValue(wf, input.id, abs)
-        const next = chosen.includes(abs) ? chosen.filter(c => c !== abs) : [...chosen, abs]
-        return setValue(wf, input.id, next.join('\n'))
-      }
+      const pick = (abs: string) => choose(wf, input, value, abs)
       const fits = (name: string) => input.type === 'file' && (!input.accept.length || input.accept.some(a => name.toLowerCase().endsWith(a.toLowerCase())))
       const rows: RenderChildren[] = entries.slice(0, MAX_PICKER_ROWS).map(en => {
         const abs = join(en.name)
@@ -570,9 +635,16 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
             <Button key={`up:${wf.id}:${input.id}`} plain onPress={() => void update($, hubPicker, p => (p ? { ...p, dir: dirName(dir) || '/' } : p))}>
               <Text color={C.blue} weight="medium" size="footnote">‹ Up</Text>
             </Button>
-            <Box flexShrink={1} minWidth={0} overflow="hidden">
+            <Box flexShrink={1} minWidth={0} overflow="hidden" flexGrow={1}>
               <Text dimColor size="footnote" wrap="truncate-start">{tildify(dir, home)}</Text>
             </Box>
+            {input.type === 'file' || input.contains?.length
+              ? (
+                  <Button key={`tosuggest:${wf.id}:${input.id}`} plain onPress={() => void update($, hubPicker, p => (p ? { ...p, mode: 'suggest' as const } : p))}>
+                    <Text color={C.blue} weight="medium" size="footnote">Suggestions</Text>
+                  </Button>
+                )
+              : null}
           </Box>
           {rows}
           {input.type === 'folder'
@@ -593,17 +665,23 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const kinds = STEP_KINDS.filter(k => wf.steps.some(s => s.kind === k))
       const chart = isDesktop
         ? (
-            <Box flexDirection="row" gap="xs" alignItems="stretch">
+            // Top to bottom, one row per level: steps that run together sit side
+            // by side and wrap onto more rows rather than squeeze.
+            <Box flexDirection="column" gap="xs">
               {levels.flatMap((level, i) => [
                 i
                   ? (
-                      <Box key={`arrow:${i}`} flexShrink={0} justifyContent="center">
-                        <Text dimColor>→</Text>
+                      <Box key={`arrow:${i}`} flexDirection="row" justifyContent="center">
+                        <Text dimColor>↓</Text>
                       </Box>
                     )
                   : null,
-                <Box key={`level:${i}`} flexDirection="column" gap="xs" flexGrow={1} flexShrink={1} minWidth={0}>
-                  {level.map(s => chip(s, run))}
+                <Box key={`level:${i}`} flexDirection="row" flexWrap="wrap" gap="xs">
+                  {level.map(s => (
+                    <Box key={`cell:${s.id}`} flexGrow={1} flexShrink={0} minWidth={level.length > 1 ? 20 : 0} width={level.length > 1 ? undefined : '100%'}>
+                      {chip(s, run)}
+                    </Box>
+                  ))}
                 </Box>,
               ])}
             </Box>
@@ -647,6 +725,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       return (
         <Box
           key={`chip:${spec.id}`}
+          flexGrow={1}
           flexDirection="column"
           paddingX={1}
           paddingY="xs"
