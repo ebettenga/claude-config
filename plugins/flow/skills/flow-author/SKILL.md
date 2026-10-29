@@ -23,7 +23,7 @@ Choose the first kind in this list that can do the step:
 3. `http`: a plain web API.
 4. `run`: shell commands. Quote typed values with `{{inputs.x | sh}}`, never `"{{inputs.x}}"`.
 5. `wait`, `uses`: waiting for a file, URL or time; running another workflow.
-6. `agent`: only for judgment, such as summarising, writing prose or deciding between options. Pick the lowest tier that can do it.
+6. `agent`: only for judgment that needs to look around files, such as auditing or summarising a repo. It is a headless Claude with only `tools` (default Read, Grep, Glob, Write; never Bash), the `read:` and `write:` folders (plus the run folder) and a `budget` in dollars: give it the least it needs. Pick the lowest tier that can do it. When the text it needs can be named up front, a `model` step is cheaper.
 7. `claude`: only when the step needs the user's own session, tools or approval.
 
 Put an `approve` step before anything that sends, publishes, pays, or changes something outside the run folder.

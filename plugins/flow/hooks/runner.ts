@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessSpawnResult, Register, Timer, TurnCompleteInput } from 'claude-code'
 
-import type { Found, ItemRun, Run, RunStatus, StepRun, StepSpec, StepStatus, Workflow } from '../types'
+import type { Found, ItemRun, Run, RunStatus, StepRun, StepSpec, StepStatus, Tier, Workflow } from '../types'
 import {
   WORK_KINDS,
   checksStatus,
@@ -565,7 +565,16 @@ async function spawnUnit(
   ctx: Live,
   spec: StepSpec,
   unit: Unit,
-  plan: { argv: string[]; cwd: string; env: Record<string, string>; outputOf?: (stdout: string) => Promise<string> },
+  plan: {
+    argv: string[]
+    cwd: string
+    env: Record<string, string>
+    outputOf?: (stdout: string) => Promise<string>
+    /** Turns stdout pieces into what the log shows (stdout is then not the live output). */
+    logOf?: (text: string) => string
+    /** Why it failed, from what it printed, instead of its exit code. */
+    errorOf?: () => string | undefined
+  },
 ): Promise<void> {
   const { rec } = unit
   const stream = $.process.spawn({ argv: plan.argv, cwd: plan.cwd, env: plan.env })
@@ -599,9 +608,10 @@ async function spawnUnit(
         const { stream: pipe, text } = piece.value
         if (pipe === 'stdout' && stdout.length < OUTPUT_MAX * 2) {
           stdout += text
-          rec.output = clip(redact(ctx, stdout.trim()), OUTPUT_MAX)
+          if (!plan.logOf) rec.output = clip(redact(ctx, stdout.trim()), OUTPUT_MAX)
         }
-        appendLog($, ctx, unit.key, rec, text)
+        const shown = pipe === 'stdout' && plan.logOf ? plan.logOf(text) : text
+        if (shown) appendLog($, ctx, unit.key, rec, shown)
         syncSoon($, ctx)
       }
     } catch (err) {
@@ -621,7 +631,8 @@ async function spawnUnit(
       }
       return endUnit($, ctx, spec, unit, 'done', { output, exitCode: 0 })
     }
-    if (result && result.code !== null) return endUnit($, ctx, spec, unit, 'failed', { output, exitCode: result.code, error: `exited with code ${result.code}` })
+    if (result && result.code !== null)
+      return endUnit($, ctx, spec, unit, 'failed', { output, exitCode: result.code, error: plan.errorOf?.() ?? `exited with code ${result.code}` })
     return endUnit($, ctx, spec, unit, 'failed', { output, error: `ended by ${result?.signal ?? 'a signal'}` })
   })().catch(() => undefined)
 }
@@ -957,34 +968,134 @@ async function runHttp($: $, ctx: Live, spec: StepSpec, unit: Unit): Promise<voi
   })
 }
 
-// An `agent` step: a flow worker of the step's tier; its answer arrives in its turn.complete.
+// An `agent` step: a headless Claude (`claude -p --restricted`) with only the
+// tools, folders and budget the step names. It is its own process, so nothing
+// asks this session's permissions: tools that run commands or code are gone,
+// file tools stay inside its folders, and anything not allowed up front is
+// refused (dontAsk). Writes go to the run folder and the step's `write:` folders.
+
+/** Each tier's model and effort, as agents/flow-<tier>.md set them. */
+const TIER_RUN: Record<Tier, { model: string; effort: string }> = {
+  light: { model: 'opus', effort: 'low' },
+  medium: { model: 'opus', effort: 'medium' },
+  careful: { model: 'opus', effort: 'high' },
+  heavy: { model: 'opus', effort: 'xhigh' },
+  fable: { model: 'fable', effort: 'high' },
+}
+
+const NOT_SIGNED_IN = 'headless Claude is not signed in on this Mac: run `claude auth login` once in a terminal, then re-run'
+
+/** The `claude -p` command line for an agent step (exported for tests). */
+export function agentArgv(o: { prompt: string; tools: string[]; read: string[]; write: string[]; model: string; effort: string; budget: number }): string[] {
+  const rule = (tool: string, dir: string) => `${tool}(/${dir.replace(/\/+$/, '')}/**)`
+  const writing = o.tools.filter(t => t === 'Write' || t === 'Edit')
+  const allowed = [...o.tools.filter(t => !writing.includes(t)), ...writing.flatMap(t => o.write.map(d => rule(t, d)))]
+  const dirs = [...new Set([...o.read, ...o.write])]
+  return [
+    'claude', '-p', o.prompt,
+    '--restricted', '--strict-mcp-config', '--no-session-persistence',
+    '--permission-mode', 'dontAsk',
+    '--tools', o.tools.join(','),
+    '--allowedTools', allowed.join(','),
+    ...(dirs.length ? ['--add-dir', ...dirs] : []),
+    '--model', o.model,
+    ...(o.effort ? ['--effort', o.effort] : []),
+    '--max-budget-usd', String(o.budget),
+    '--output-format', 'stream-json', '--verbose',
+  ]
+}
+
+/** One stream-json event as a log line, or nothing. */
+function agentLogLine(ev: Record<string, unknown>): string {
+  const content = (ev.message as { content?: unknown } | undefined)?.content
+  const blocks = Array.isArray(content) ? (content as Record<string, unknown>[]) : []
+  if (ev.type === 'system' && ev.subtype === 'init') return `--- claude started: ${String(ev.model ?? '')} · tools ${((ev.tools as string[] | undefined) ?? []).join(', ')} ---\n`
+  if (ev.type === 'assistant')
+    return blocks
+      .map(b => {
+        if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) return `${b.text.trim()}\n`
+        if (b.type === 'tool_use') {
+          const input = (b.input ?? {}) as Record<string, unknown>
+          const what = [input.file_path, input.path, input.pattern, input.query, input.url].find(v => typeof v === 'string')
+          return `→ ${String(b.name)}${what ? ` ${String(what)}` : ''}\n`
+        }
+        return ''
+      })
+      .join('')
+  if (ev.type === 'user')
+    return blocks
+      .filter(b => b.type === 'tool_result' && b.is_error)
+      .map(b => `  ✗ ${oneLine(typeof b.content === 'string' ? b.content : JSON.stringify(b.content ?? ''), 300)}\n`)
+      .join('')
+  if (ev.type === 'result') {
+    const cost = typeof ev.total_cost_usd === 'number' ? ` · $${ev.total_cost_usd.toFixed(2)}` : ''
+    const denied = Array.isArray(ev.permission_denials) ? ev.permission_denials.length : 0
+    return `--- ${ev.is_error ? 'stopped' : 'done'}: ${String(ev.num_turns ?? '?')} turns${cost}${denied ? ` · ${denied} refused` : ''} ---\n`
+  }
+  return ''
+}
+
 async function runAgent($: $, ctx: Live, spec: StepSpec, unit: Unit): Promise<void> {
   const { run } = ctx
-  const { rec } = unit
-  const value = unit.index === undefined ? undefined : itemOf(spec, unit.index, unit.step.items?.[unit.index]?.value ?? '')
-  const body = fill(spec.body, templateContext(ctx, value))
+  const value = unitItem(spec, unit)
+  const tctx = templateContext(ctx, value)
+  const a = spec.agent ?? { tools: ['Read', 'Grep', 'Glob', 'Write'], read: [], write: [], budget: 1, use: '', effort: '' }
+  const tier = TIER_RUN[spec.tier ?? 'medium']
+  const abs = (p: string) => (p.startsWith('/') ? p : `${run.workflowDir}/${p}`)
+  const read = a.read.map(d => fill(d, tctx).trim()).filter(Boolean).map(abs)
+  const write = [run.dir, ...a.write.map(d => fill(d, tctx).trim()).filter(Boolean).map(abs)]
+  const body = fill(spec.body, tctx)
   const prompt = [
     `You are running one step of the flow workflow "${run.title}" (${run.workflowId}).`,
     `Step: ${spec.title} (${spec.id})`,
     ...(value ? [`Item ${value.index}: ${value.value}`] : []),
     `Run folder: ${run.dir}`,
-    `Write files only where the step says; your final answer becomes this step's output.`,
+    `You can read: ${[run.dir, ...read].join(', ')}. You can write only in: ${write.join(', ')}.`,
+    `Your final answer becomes this step's output.`,
     '',
     body,
   ].join('\n')
-  appendLog($, ctx, unit.key, rec, `${prompt}\n\n`)
-  await saveNow($, ctx)
-  const title = value ? `${spec.title} [${value.value}]` : spec.title
-  const subagentType = `flow:flow-${spec.tier ?? 'medium'}`
-  const description = `${run.title}: ${title}`
-  const release = expectWorker(subagentType, description)
-  const started = await $.agent.spawn({ subagentType, description, prompt }).finally(release)
-  if (started.deny !== undefined) return endUnit($, ctx, spec, unit, 'failed', { error: started.deny })
-  if (!started.agentId) return endUnit($, ctx, spec, unit, 'failed', { error: 'the agent did not start' })
-  if (rec.status !== 'running') return
-  rec.agentId = started.agentId
-  agentSteps.set(started.agentId, { runId: run.id, stepId: unit.step.id, index: unit.index })
-  await saveNow($, ctx)
+  appendLog($, ctx, unit.key, unit.rec, `${prompt}\n\n`)
+
+  let buffer = ''
+  let result: Record<string, unknown> | undefined
+  const logOf = (text: string) => {
+    buffer += text
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    let shown = ''
+    for (const line of lines) {
+      if (!line.trim()) continue
+      let ev: Record<string, unknown>
+      try {
+        ev = JSON.parse(line) as Record<string, unknown>
+      } catch {
+        shown += `${line}\n`
+        continue
+      }
+      if (ev.type === 'result') result = ev
+      shown += agentLogLine(ev)
+    }
+    return shown
+  }
+  const answer = () => (typeof result?.result === 'string' ? result.result.trim() : '')
+  return spawnUnit($, ctx, spec, unit, {
+    argv: agentArgv({ prompt, tools: a.tools, read, write, model: a.use || tier.model, effort: a.effort || tier.effort, budget: a.budget }),
+    cwd: run.dir,
+    env: stepEnv(ctx, value),
+    logOf,
+    outputOf: async () => {
+      if (buffer.trim()) logOf('\n')
+      return answer()
+    },
+    errorOf: () => {
+      if (buffer.trim()) logOf('\n')
+      const text = answer()
+      if (/not logged in|\/login/i.test(text)) return NOT_SIGNED_IN
+      if (result?.subtype === 'error_max_budget_usd') return `stopped at its $${a.budget} budget`
+      return text ? `claude stopped: ${oneLine(text, 300)}` : undefined
+    },
+  })
 }
 
 async function agentDone($: $, hit: AgentHit, e: TurnCompleteInput): Promise<void> {
@@ -1696,34 +1807,6 @@ async function registerTools($: $): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Approving flow's own workers (the allowWorkers option)
-
-/** Worker spawns the runner is making right now: `<subagent type>|<description>` → count. */
-const expectedWorkers = new Map<string, number>()
-
-/** Marks a spawn as the runner's own until it settles; returns the release. */
-function expectWorker(subagentType: string, description: string): () => void {
-  const key = `${subagentType}|${description}`
-  expectedWorkers.set(key, (expectedWorkers.get(key) ?? 0) + 1)
-  let isReleased = false
-  return () => {
-    if (isReleased) return
-    isReleased = true
-    const n = (expectedWorkers.get(key) ?? 1) - 1
-    if (n > 0) expectedWorkers.set(key, n)
-    else expectedWorkers.delete(key)
-  }
-}
-
-/** Whether this Agent permission check is a worker spawn flow's runner is making itself. */
-export function isOwnWorkerSpawn(originPlugin: string, input: unknown): boolean {
-  if (originPlugin !== 'flow' || typeof input !== 'object' || input === null) return false
-  const { subagent_type: type, description } = input as { subagent_type?: unknown; description?: unknown }
-  if (typeof type !== 'string' || !/^flow:flow-(light|medium|careful|heavy|fable)$/.test(type)) return false
-  return expectedWorkers.has(`${type}|${typeof description === 'string' ? description : ''}`)
-}
-
 export function registerRunner(on: Parameters<Register>[0], options: Record<string, unknown>): void {
   live.clear()
   agentSteps.clear()
@@ -1731,17 +1814,6 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
   isHydrated = false
   sessionCwd = undefined
   workflowsDir = typeof options.workflowsDir === 'string' && options.workflowsDir.trim() ? options.workflowsDir.trim() : '~/Documents/flows'
-
-  // With allowWorkers on, flow says yes to the workers its own runs start, and
-  // to nothing else: every other Agent check, and every tool a worker then
-  // uses, is the session's permission mode's to decide, as without flow.
-  if (options.allowWorkers === 'on') {
-    on('tool.check', { tool: 'Agent' }, async (_$, e, next) => {
-      if (isOwnWorkerSpawn(next.origin.plugin, e.input))
-        return { decision: 'allow', reason: 'a flow workflow worker (flow: Let workflows start flow workers is on)' }
-      return next(e)
-    }).catch((_$, e, next) => next(e))
-  }
 
   // progress.tsx hooks session.start and turn.complete without a matcher, and a
   // plugin may do that once per event: these matchers name every case, so the

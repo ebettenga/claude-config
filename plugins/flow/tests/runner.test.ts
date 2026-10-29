@@ -223,19 +223,25 @@ test('a run step past its timeout fails', async ($, on) => {
   w.procs[0]?.finish(0)
 })
 
-test('an agent step spawns its worker and finishes on its turn.complete', async ($, on) => {
+test('an agent step runs a restricted headless claude and its result is the output', async ($, on) => {
   const w = world(on, {
     files: {
+      '/Users/me/app/package.json': '{}',
       [`${FLOWS}/ag/flow.yaml`]: `
 title: Agent flow
 inputs:
   - id: topic
     type: text
     default: golf
+  - id: repo
+    type: folder
+    default: /Users/me/app
 steps:
   - id: write
     title: Write it
     agent: light
+    read: ["{{inputs.repo}}"]
+    budget: 0.5
     prompt: Write about {{inputs.topic}} into {{run.dir}}/out.md
 `,
     },
@@ -244,30 +250,50 @@ steps:
   const id = await start($, 'ag')
   await w.clock.settle()
 
-  expect(w.spawned.length).toBe(1)
-  // The kit hands agent.spawn hooks the Agent tool's input (subagent_type), so the type is not on `e` here.
-  expect(w.spawned[0]).toMatchObject({ description: 'Agent flow: Write it' })
-  expect(w.spawned[0]?.prompt).toContain('You are running one step of the flow workflow "Agent flow" (ag).\nStep: Write it (write)')
-  expect(w.spawned[0]?.prompt).toContain(`Run folder: ${RUNS}/ag/${id}`)
-  expect(w.spawned[0]?.prompt).toContain("your final answer becomes this step's output")
-  expect(w.spawned[0]?.prompt).toContain(`Write about golf into ${RUNS}/ag/${id}/out.md`)
+  const dir = `${RUNS}/ag/${id}`
+  const p = w.procs[0]
+  expect(w.spawned.length).toBe(0)
+  expect(p?.cwd).toBe(dir)
+  const argv = p?.argv ?? []
+  expect(argv.slice(0, 2)).toEqual(['claude', '-p'])
+  expect(argv[2]).toContain('You are running one step of the flow workflow "Agent flow" (ag).\nStep: Write it (write)')
+  expect(argv[2]).toContain(`Write about golf into ${dir}/out.md`)
+  expect(argv[2]).toContain(`You can write only in: ${dir}.`)
+  for (const flag of ['--restricted', '--strict-mcp-config', '--no-session-persistence']) expect(argv).toContain(flag)
+  const after = (flag: string) => argv[argv.indexOf(flag) + 1]
+  expect(after('--permission-mode')).toBe('dontAsk')
+  expect(after('--tools')).toBe('Read,Grep,Glob,Write')
+  // Reads anywhere in its folders; writes only under the run folder.
+  expect(after('--allowedTools')).toBe(`Read,Grep,Glob,Write(/${dir}/**)`)
+  expect(argv.slice(argv.indexOf('--add-dir') + 1, argv.indexOf('--add-dir') + 3)).toEqual(['/Users/me/app', dir])
+  expect(after('--model')).toBe('opus')
+  expect(after('--effort')).toBe('low')
+  expect(after('--max-budget-usd')).toBe('0.5')
 
-  const step = w.runFile('ag', id).steps[0]
-  if (!step?.agentId) {
-    // This kit answers a plugin's $.agent.spawn with no agentId (core sets it), so
-    // nothing can match a turn.complete: the step says the agent did not start.
-    expect(step).toMatchObject({ status: 'failed', error: 'the agent did not start' })
-    return
-  }
-  expect(step).toMatchObject({ status: 'running' })
-  // Another agent's turn changes nothing.
-  await $.turn.complete({ agentId: 'someone-else', reason: 'answer', answer: 'no', durationMs: 1, isAborted: false, turnId: 't0' } as never)
-  expect(w.runFile('ag', id).steps[0]?.status).toBe('running')
-  await $.turn.complete({ agentId: step.agentId, reason: 'answer', answer: '  Wrote out.md.  ', durationMs: 1, isAborted: false, turnId: 't1' } as never)
+  const events = [
+    { type: 'system', subtype: 'init', model: 'claude-opus-5-5', tools: ['Read', 'Write'] },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: `${dir}/out.md` } }] } },
+    { type: 'result', subtype: 'success', is_error: false, num_turns: 2, total_cost_usd: 0.04, result: '  Wrote out.md.  ' },
+  ]
+  p?.finish(0, `${events.map(e => JSON.stringify(e)).join('\n')}\n`)
   await w.clock.settle()
   const run = w.runFile('ag', id)
   expect(run.steps[0]).toMatchObject({ status: 'done', output: 'Wrote out.md.' })
   expect(run.status).toBe('done')
+  const log = w.files.get(`${dir}/write.log`) ?? ''
+  expect(log).toContain(`→ Write ${dir}/out.md`)
+  expect(log).toContain('--- done: 2 turns · $0.04 ---')
+  expect(log).not.toContain('"type"')
+})
+
+test('an agent step that is not signed in says how to sign in', async ($, on) => {
+  const w = world(on, { files: { [`${FLOWS}/ag/flow.yaml`]: 'title: A\nsteps:\n  - id: w\n    agent: light\n    prompt: hi\n' } })
+  await begin($)
+  const id = await start($, 'ag')
+  await w.clock.settle()
+  w.procs[0]?.finish(1, `${JSON.stringify({ type: 'result', is_error: true, result: 'Not logged in · Please run /login' })}\n`)
+  await w.clock.settle()
+  expect(w.runFile('ag', id).steps[0]?.error).toContain('claude auth login')
 })
 
 // decideStep is the hub's to call from its own hooks: the kit refuses a test's

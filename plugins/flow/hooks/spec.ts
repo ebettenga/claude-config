@@ -2,7 +2,7 @@
 // so the rules can be tested on their own; register.tsx reads the files.
 
 import { load } from './vendor/js-yaml.mjs'
-import type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow, ModelSpec } from '../types'
+import type { AgentSpec, ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow, ModelSpec } from '../types'
 
 export type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow }
 
@@ -15,6 +15,11 @@ export const PYTHON_FIELDS = ['file', 'code', 'args', 'interpreter', 'requiremen
 export const MCP_FIELDS = ['server', 'tool', 'args'] as const
 export const HTTP_FIELDS = ['method', 'url', 'headers', 'body', 'expect'] as const
 export const MODEL_FIELDS = ['prompt', 'files', 'write', 'use', 'max_tokens', 'effort', 'system'] as const
+/** The tools an agent step may list; none of them runs commands or code. */
+export const AGENT_TOOLS = ['Read', 'Grep', 'Glob', 'Write', 'Edit', 'WebSearch', 'WebFetch'] as const
+const AGENT_READ_TOOLS = ['Read', 'Grep', 'Glob']
+const DEFAULT_AGENT_BUDGET = 1
+const MAX_AGENT_BUDGET = 20
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const WAIT_KINDS = ['file', 'url', 'until'] as const
 export const FILTERS = ['sh', 'json'] as const
@@ -227,6 +232,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
       let python: PythonSpec | undefined
       let mcp: McpSpec | undefined
       let ask: ModelSpec | undefined
+      let agent: AgentSpec | undefined
       let http: HttpSpec | undefined
       /** The templated parts of a python, mcp or http step, and whether each may use {{env.NAME}}. */
       const parts: { text: string; isEnvOk: boolean }[] = []
@@ -238,6 +244,21 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
         if (!TIERS.includes(tier)) errors.push(`${at}.agent: "${str(raw.agent)}" must be one of ${TIERS.join(', ')}`)
         body = str(raw.prompt)
         if (!body) errors.push(`${at}.prompt: an agent step needs a prompt`)
+        // A headless Claude with only these tools: nothing that runs commands or code.
+        const tools = raw.tools === undefined ? [...AGENT_READ_TOOLS, 'Write'] : strList(raw.tools)
+        for (const t of tools)
+          if (!(AGENT_TOOLS as readonly string[]).includes(t))
+            errors.push(
+              t === 'Bash' || t === 'PowerShell'
+                ? `${at}.tools: ${t} is not allowed in an agent step (put the command in a run step before it)`
+                : `${at}.tools: "${t}" must be one of ${AGENT_TOOLS.join(', ')}`,
+            )
+        const budget = raw.budget === undefined ? DEFAULT_AGENT_BUDGET : Number(raw.budget)
+        if (!Number.isFinite(budget) || budget <= 0 || budget > MAX_AGENT_BUDGET) errors.push(`${at}.budget: must be dollars, more than 0 and at most ${MAX_AGENT_BUDGET}`)
+        const effort = str(raw.effort).trim()
+        if (effort && !EFFORTS.includes(effort)) errors.push(`${at}.effort: must be one of ${EFFORTS.join(', ')}`)
+        agent = { tools: [...new Set(tools)], read: strList(raw.read), write: strList(raw.write), budget, use: str(raw.use).trim(), effort }
+        for (const t of [...agent.read, ...agent.write]) parts.push({ text: t, isEnvOk: false })
       } else if (kind === 'wait') {
         const w = raw.wait
         if (!isObj(w)) errors.push(`${at}.wait: must be a mapping with one of ${WAIT_KINDS.join(', ')}`)
@@ -359,12 +380,14 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
         body = `${method} ${url}`
       } else if (!body) errors.push(`${at}.${kind}: is empty`)
       onlyFor('with', ['uses'])
+      for (const field of ['tools', 'read', 'write', 'budget', 'use', 'effort']) onlyFor(field, ['agent'])
       onlyFor('interval', ['wait'])
 
       const timeout = raw.timeout === undefined ? (kind === 'wait' ? DEFAULT_WAIT_TIMEOUT_SEC : DEFAULT_TIMEOUT_SEC) : Number(raw.timeout)
       if (!Number.isFinite(timeout) || timeout <= 0) errors.push(`${at}.timeout: must be a number of seconds`)
       const after = raw.after === undefined ? (steps.length ? [steps[steps.length - 1]?.id ?? ''] : []) : strList(raw.after)
       const spec: StepSpec = { id: stepId, title: str(raw.title) || stepId, kind, body, tier, cwd: str(raw.cwd), after, timeoutSec: timeout, continueOnFail: raw.continue_on_fail === true }
+      if (agent) spec.agent = agent
 
       // if:
       if (raw.if !== undefined) {

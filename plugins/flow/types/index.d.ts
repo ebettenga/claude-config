@@ -109,6 +109,24 @@ export type StepSpec = {
   http?: HttpSpec
   /** A model step: one prompt to Claude with files attached; no agent, no tools. */
   ask?: ModelSpec
+  /** An agent step: what its headless Claude may use. */
+  agent?: AgentSpec
+}
+
+/** An agent step runs `claude -p --restricted` with only these. */
+export type AgentSpec = {
+  /** Built-in tools it gets (never one that runs commands or code). Default Read, Grep, Glob, Write. */
+  tools: string[]
+  /** Templated folders it may read, besides the run folder. */
+  read: string[]
+  /** Templated folders it may write, besides the run folder. */
+  write: string[]
+  /** Dollars it may spend before it is stopped. */
+  budget: number
+  /** A model alias or id; empty: the tier's. */
+  use: string
+  /** An effort level; empty: the tier's. */
+  effort: string
 }
 
 export type ModelSpec = {

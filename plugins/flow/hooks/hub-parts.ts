@@ -214,9 +214,18 @@ export function stepSub(spec: StepSpec, itemCount?: number): string {
     case 'http':
       parts.push(spec.http ? `${spec.http.method} ${spec.http.url}` : firstLine(spec.body))
       break
-    case 'agent':
+    case 'agent': {
+      // What its headless Claude may do: "medium · reads repo · writes run folder · $1 cap".
+      const a = spec.agent
+      const name = (d: string) => d.match(/\{\{\s*inputs\.([\w-]+)/)?.[1] ?? d.replace(/\/+$/, '').split('/').pop() ?? d
+      const isWriting = a ? a.tools.some(t => t === 'Write' || t === 'Edit') : true
       parts.push(spec.tier ?? 'agent')
+      if (a?.read.length) parts.push(`reads ${a.read.map(name).join(', ')}`)
+      parts.push(isWriting ? `writes ${['run folder', ...(a?.write ?? []).map(name)].join(', ')}` : 'read-only')
+      if (a?.tools.some(t => t.startsWith('Web'))) parts.push('web')
+      parts.push(`$${a?.budget ?? 1} cap`)
       break
+    }
     case 'claude':
       parts.push('Claude, in this session')
       break

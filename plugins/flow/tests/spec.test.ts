@@ -646,3 +646,13 @@ test('loader: a model step is AI, and its fields are checked', () => {
   expect(bad.errors.join('\n')).toContain('model.effort: must be one of')
   expect(bad.errors.join('\n')).toContain('model.max_tokens')
 })
+
+test('loader: an agent step takes tools, read, write and budget, and never Bash', () => {
+  const ok = parse('title: T\nsteps:\n  - id: a\n    agent: medium\n    tools: [Read, Grep]\n    read: ["{{inputs.repo}}"]\n    budget: 2\n    prompt: look\ninputs:\n  - id: repo\n    type: folder\n')
+  expect(ok.errors).toEqual([])
+  expect(ok.workflow?.steps[0]?.agent).toEqual({ tools: ['Read', 'Grep'], read: ['{{inputs.repo}}'], write: [], budget: 2, use: '', effort: '' })
+  const bad = parse('title: T\nsteps:\n  - id: a\n    agent: medium\n    tools: [Read, Bash]\n    budget: 50\n    prompt: look\n  - id: b\n    run: echo\n    tools: [Read]\n')
+  expect(bad.errors.join('\n')).toContain('Bash is not allowed in an agent step')
+  expect(bad.errors.join('\n')).toContain('budget: must be dollars')
+  expect(bad.errors.join('\n')).toContain('steps[1].tools: only agent steps take tools:')
+})

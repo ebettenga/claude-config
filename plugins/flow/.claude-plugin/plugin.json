@@ -24,16 +24,6 @@
         "any",
         "off"
       ]
-    },
-    "allowWorkers": {
-      "type": "string",
-      "title": "Let workflows start flow workers",
-      "description": "on: flow approves the flow-light \u2026 flow-fable workers its own workflow runs start, so agent steps run in auto mode. Only those: any other agent, and every tool a worker uses, is still decided by your permission mode. off: agent steps are checked like any other agent, and auto mode refuses them.",
-      "default": "off",
-      "options": [
-        "off",
-        "on"
-      ]
     }
   }
 }
