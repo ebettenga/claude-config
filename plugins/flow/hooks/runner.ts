@@ -6,9 +6,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessSpawnResult, Register, Timer, TurnCompleteInput } from 'claude-code'
 
-import type { Found, FoundView, ItemRun, Layout, LayoutGroup, Run, RunStatus, Source, SourceState, StepRun, StepSpec, StepStatus, Tier, ViewCall, ViewPart, ViewSpec, ViewState, Workflow } from '../types'
+import type { Found, FoundView, ItemRun, Layout, LayoutGroup, Run, RunStatus, Source, SourceState, StepRun, StepSpec, StepStatus, Tier, ViewAction, ViewCall, ViewPart, ViewSpec, ViewState, ViewTab, Workflow } from '../types'
 import { LAYOUT_FILE, layoutYaml, parseLayout, parseSources, rawSources } from './layout'
-import { VIEW_FILE, fillArgs, fillView, getPath, listArgs, parseResult, parseView, pickRows } from './views'
+import { VIEW_FILE, activeFilters, fillArgs, fillView, formValues, getPath, listArgs, missingFields, parseResult, parseView, pickRows, rangeOf, shiftAnchor } from './views'
 import { rememberValues } from './file-finder'
 import {
   WORK_KINDS,
@@ -251,7 +251,11 @@ async function viewCall($: $, c: ViewCall, ctx: Record<string, unknown>): Promis
 
 const viewError = (err: unknown, c: ViewCall) => {
   const msg = errText(err)
-  return /unknown tool|tool .*not found|no such tool/i.test(msg) ? `${c.server} has no tool ${c.tool} yet (${msg})` : msg
+  if (/unknown tool|tool .*not found|no such tool|no connected MCP tool/i.test(msg)) return `${c.server} has no tool ${c.tool} yet: update or restart its server, then reconnect it in /mcp`
+  // Auto mode refuses a plugin's MCP call it was not asked about: an allow rule lets it through.
+  if (/refused|classifier|not allowed|permission/i.test(msg))
+    return `Claude Code did not allow ${c.server} ${c.tool}. Add "mcp__${c.server.replace(/[^A-Za-z0-9_-]/g, '_')}__${c.tool}" to permissions.allow in ~/.claude/settings.json, then press Refresh.`
+  return msg
 }
 
 async function viewOf($: $, id: string): Promise<ViewSpec | undefined> {
@@ -263,54 +267,142 @@ async function viewOf($: $, id: string): Promise<ViewSpec | undefined> {
   return all.find(v => v.id === id && v.view)?.view
 }
 
-async function setViewState($: $, id: string, change: (s: ViewState) => ViewState): Promise<ViewState> {
-  let next: ViewState | undefined
+async function setViewState($: $, id: string, change: (s: ViewState) => ViewState): Promise<ViewState | undefined> {
   await update($, viewStatesAtom, all => {
-    const cur = all[id] ?? { query: '', filter: '', list: { state: 'loading' }, key: '', detail: {} }
-    next = change(cur)
-    return { ...all, [id]: next }
+    const cur: ViewState = { query: '', filter: '', page: 1, list: { state: 'loading' }, key: '', detail: {}, tab: '', ranges: {}, ...all[id] }
+    return { ...all, [id]: change(cur) }
   })
-  return next as ViewState
+  // Read it back: the change may run after update resolves its caller.
+  return (await read($, viewStatesAtom))[id]
 }
 
-/** Runs a view's list call for a search and a filter (the first filter by default). */
-export async function viewSearch($: $, id: string, query: string, filter?: string): Promise<ViewState | undefined> {
+/** Runs a view's list call for a search, filters (one per group; each group's first by default) and a page. */
+export async function viewSearch($: $, id: string, query: string, filter?: string, page = 1): Promise<ViewState | undefined> {
   const view = await viewOf($, id)
   if (!view) return undefined
   const prev = (await read($, viewStatesAtom))[id]
-  const f = filter ?? (prev?.filter || view.filters[0]?.id || '')
-  await setViewState($, id, s => ({ ...s, query, filter: f, list: { state: 'loading' }, key: '' }))
+  const f = activeFilters(view, filter ?? prev?.filter ?? '').map(x => x.id).join(',')
+  const p = Math.max(1, Math.floor(page))
+  await setViewState($, id, s => ({ ...s, query, filter: f, page: p, list: { state: 'loading' }, key: '', open: undefined, notice: undefined }))
   let list: ViewPart
   try {
-    const value = await viewCall($, { ...view.list.call, args: listArgs(view, query, f) }, {})
+    const value = await viewCall($, { ...view.list.call, args: listArgs(view, query, f, p) }, {})
     const { items, total } = pickRows(view.list.rows, value)
     const count = view.list.count ? Number(getPath(value, view.list.count)) : NaN
     list = { state: 'ok', value: { items, total: Number.isFinite(count) ? count : total } }
   } catch (err) {
     list = { state: 'error', message: viewError(err, view.list.call) }
   }
-  return setViewState($, id, s => (s.query === query && s.filter === f ? { ...s, list } : s))
+  return setViewState($, id, s => (s.query === query && s.filter === f && s.page === p ? { ...s, list } : s))
 }
 
-/** Opens one item of a view: its detail calls run at once, each filling in as it answers. */
-export async function viewOpen($: $, id: string, key: string): Promise<ViewState | undefined> {
-  const view = await viewOf($, id)
-  if (!view?.detail) return undefined
-  const calls = Object.entries(view.detail.calls)
-  await setViewState($, id, s => ({ ...s, key, detail: Object.fromEntries(calls.map(([name]) => [name, { state: 'loading' } as ViewPart])) }))
+async function todayIso($: $): Promise<string> {
+  return new Date(await $.clock.now()).toISOString().slice(0, 10)
+}
+
+/** The tab a state shows: the one it names, else the first. */
+export function tabOf(view: ViewSpec, state: Pick<ViewState, 'tab'> | undefined): ViewTab | undefined {
+  const tabs = view.detail?.tabs ?? []
+  return tabs.find(t => t.id === state?.tab) ?? tabs[0]
+}
+
+/** A tab's range now: its mode and the days it covers. */
+export function tabRange(tab: ViewTab | undefined, state: Pick<ViewState, 'ranges'> | undefined, today: string) {
+  if (!tab?.range) return undefined
+  const r = state?.ranges?.[tab.id]
+  return rangeOf(r?.mode ?? tab.range.default, r?.anchor ?? today)
+}
+
+/** Runs calls and fills each in as it answers; only while the same item is open. */
+async function runDetailCalls($: $, id: string, key: string, calls: [string, ViewCall][], ctx: Record<string, unknown>): Promise<void> {
+  if (!calls.length) return
+  await setViewState($, id, s => ({ ...s, detail: { ...s.detail, ...Object.fromEntries(calls.map(([name]) => [name, { state: 'loading' } as ViewPart])) } }))
   await Promise.all(
     calls.map(async ([name, c]) => {
       let part: ViewPart
       try {
-        // A key of digits is a number to the tool, as the list gave it (an id).
-        part = { state: 'ok', value: await viewCall($, c, { key: /^\d{1,15}$/.test(key) ? Number(key) : key }) }
+        part = { state: 'ok', value: await viewCall($, c, ctx) }
       } catch (err) {
         part = { state: 'error', message: viewError(err, c) }
       }
       await setViewState($, id, s => (s.key === key ? { ...s, detail: { ...s.detail, [name]: part } } : s))
     }),
   )
+}
+
+// A key of digits is a number to the tool, as the list gave it (an id).
+const keyValue = (key: string) => (/^\d{1,15}$/.test(key) ? Number(key) : key)
+
+async function loadTab($: $, view: ViewSpec, id: string, key: string, tab: ViewTab | undefined): Promise<void> {
+  if (!tab) return
+  const state = (await read($, viewStatesAtom))[id]
+  const range = tabRange(tab, state, await todayIso($))
+  // The page's answered calls are in reach (a user id from the profile, say).
+  const results: Record<string, unknown> = {}
+  for (const [name, part] of Object.entries(state?.detail ?? {})) if (part.state === 'ok' && view.detail?.calls[name]) results[name] = part.value
+  await runDetailCalls($, id, key, Object.entries(tab.calls), { ...results, key: keyValue(key), ...(range ? { range } : {}) })
+}
+
+/** Opens one item of a view: the page's calls and its first tab's run at once, each filling in as it answers. */
+export async function viewOpen($: $, id: string, key: string, tabId?: string): Promise<ViewState | undefined> {
+  const view = await viewOf($, id)
+  if (!view?.detail) return undefined
+  const prev = (await read($, viewStatesAtom))[id]
+  const tab = tabOf(view, { tab: tabId ?? (prev?.key === key ? prev.tab : '') })
+  await setViewState($, id, s => ({ ...s, key, detail: {}, tab: tab?.id ?? '', open: undefined, ...(s.key === key ? {} : { notice: undefined }) }))
+  // The page's calls first: the tab's may use what they answer.
+  await runDetailCalls($, id, key, Object.entries(view.detail.calls), { key: keyValue(key) })
+  await loadTab($, view, id, key, tab)
   return (await read($, viewStatesAtom))[id]
+}
+
+/** Shows another tab of the open item and runs its calls. */
+export async function viewTab($: $, id: string, tabId: string): Promise<void> {
+  const view = await viewOf($, id)
+  const state = (await read($, viewStatesAtom))[id]
+  if (!view?.detail || !state?.key) return
+  const tab = tabOf(view, { tab: tabId })
+  await setViewState($, id, s => ({ ...s, tab: tab?.id ?? '', open: undefined }))
+  await loadTab($, view, id, state.key, tab)
+}
+
+/** Changes the open tab's range: another mode, or one period back (-1) or on (1); then runs its calls again. */
+export async function viewRange($: $, id: string, change: { mode?: string; by?: -1 | 1 }): Promise<void> {
+  const view = await viewOf($, id)
+  const state = (await read($, viewStatesAtom))[id]
+  const tab = view ? tabOf(view, state) : undefined
+  if (!view || !state?.key || !tab?.range) return
+  const today = await todayIso($)
+  const cur = state.ranges[tab.id] ?? { mode: tab.range.default, anchor: today }
+  const next = change.mode ? { mode: change.mode, anchor: cur.anchor } : { mode: cur.mode, anchor: shiftAnchor(cur.mode, cur.anchor, change.by ?? 1) }
+  await setViewState($, id, s => ({ ...s, ranges: { ...s.ranges, [tab.id]: next } }))
+  await loadTab($, view, id, state.key, tab)
+}
+
+/** Runs an action's call with the page (and its row and form) in reach, then reloads what the page shows. */
+export async function viewAction($: $, id: string, action: ViewAction, ctx: Record<string, unknown>, values: Record<string, string> = {}): Promise<{ ok: boolean; text: string }> {
+  const missing = missingFields(action.fields, values)
+  if (missing.length) {
+    const text = `${action.label}: fill in ${missing.join(', ')}`
+    await setViewState($, id, s => ({ ...s, notice: { ok: false, text } }))
+    return { ok: false, text }
+  }
+  const full = { ...ctx, form: formValues(action.fields, values) }
+  await setViewState($, id, s => (s.open ? { ...s, open: { ...s.open, isRunning: true } } : s))
+  let notice: { ok: boolean; text: string }
+  try {
+    await viewCall($, action.call, full)
+    notice = { ok: true, text: action.done ? fillView(action.done, full) : `${action.label}: done` }
+  } catch (err) {
+    notice = { ok: false, text: `${action.label}: ${viewError(err, action.call)}` }
+  }
+  await setViewState($, id, s => ({ ...s, notice, open: notice.ok ? undefined : s.open ? { ...s.open, isRunning: false, isConfirming: false } : undefined }))
+  if (notice.ok) {
+    const state = (await read($, viewStatesAtom))[id]
+    if (state?.key) await viewOpen($, id, state.key)
+    else if (state) await viewSearch($, id, state.query, state.filter, state.page)
+  }
+  return notice
 }
 
 /** The view's open item as text: its title and each section's stats and lines, as the pane shows them. */
@@ -318,13 +410,17 @@ function viewDetailText(view: ViewSpec, state: ViewState): string {
   const d = view.detail
   if (!d) return ''
   const ctx: Record<string, unknown> = { key: state.key, query: state.query, filter: state.filter }
+  const range = tabRange(tabOf(view, state), state, new Date().toISOString().slice(0, 10))
+  if (range) ctx.range = range
   const errors: string[] = []
   for (const [name, part] of Object.entries(state.detail)) {
     if (part.state === 'ok') ctx[name] = part.value
     else if (part.state === 'error') errors.push(`${name}: ${part.message}`)
   }
   const lines = [fillView(d.title, ctx), ...(d.subtitle ? [fillView(d.subtitle, ctx)] : [])]
-  for (const sec of d.sections) {
+  const tab = tabOf(view, state)
+  if (d.tabs.length) lines.push('', `Tabs: ${d.tabs.map(t => (t.id === tab?.id ? `[${t.title}]` : t.title)).join(' · ')} (open_view with tab opens another)`)
+  for (const sec of [...d.sections, ...(tab?.sections ?? [])]) {
     const part = sec.from ? state.detail[sec.from] : undefined
     lines.push('', `## ${sec.title}`)
     if (part?.state === 'error') {
@@ -341,6 +437,21 @@ function viewDetailText(view: ViewSpec, state: ViewState): string {
       if (!items.length) lines.push(sec.rows.empty)
       for (const row of items) lines.push(`- ${fillView(sec.rows.text, { ...ctx, row })}`)
       if (total > items.length) lines.push(`(${total - items.length} more)`)
+    }
+    if (sec.table) {
+      const { items, total } = pickRows({ items: sec.table.items, text: '', empty: '', limit: sec.table.limit }, ctx)
+      if (!items.length) lines.push(sec.table.empty)
+      else lines.push(`| ${sec.table.columns.map(c => c.label).join(' | ')} |`)
+      for (const row of items) lines.push(`| ${sec.table.columns.map(c => fillView(c.value, { ...ctx, row }).replace(/\|/g, '/')).join(' | ')} |`)
+      if (total > items.length) lines.push(`(${total - items.length} more)`)
+    }
+    if (sec.chart) {
+      const { items } = pickRows({ items: sec.chart.items, text: '', empty: '', limit: 30 }, ctx)
+      for (const row of items) lines.push(`- ${fillView(sec.chart.label, { ...ctx, row })}: ${fillView(sec.chart.value, { ...ctx, row })}`)
+    }
+    if (sec.pairs) {
+      const obj = getPath(ctx, sec.pairs)
+      if (obj && typeof obj === 'object') for (const [k, v] of Object.entries(obj)) lines.push(`- ${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
     }
   }
   if (errors.length) lines.push('', ...errors.map(e => `error: ${e}`))
@@ -2067,6 +2178,8 @@ async function registerTools($: $): Promise<void> {
         query: { type: 'string', description: 'Search text for the view\'s list.' },
         filter: { type: 'string', description: 'A filter id from list_views; default the view\'s first.' },
         key: { type: 'string', description: 'An item\'s key, to open its detail page.' },
+        tab: { type: 'string', description: 'With key: the detail tab to open (its id or title).' },
+        page: { type: 'number', description: 'With query: the page of results, from 1 (views with paged lists).' },
       },
       required: ['id'],
     },
@@ -2219,7 +2332,7 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
   })
 
   on('tool.call', { tool: 'mcp__flow__open_view' }, async ($, e) => {
-    const input = e as unknown as { id?: unknown; query?: unknown; filter?: unknown; key?: unknown }
+    const input = e as unknown as { id?: unknown; query?: unknown; filter?: unknown; key?: unknown; tab?: unknown; page?: unknown }
     const id = str(input.id)
     const view = await viewOf($, id)
     if (!view) return { result: `error: no view "${id}" (list_views lists them)` }
@@ -2227,12 +2340,15 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     const key = str(input.key)
     if (key) {
       if (!view.detail) return { result: `error: view "${id}" has no detail page` }
-      const state = await viewOpen($, id, key)
+      const want = str(input.tab).toLowerCase()
+      const tab = want ? view.detail.tabs.find(t => t.id === want || t.title.toLowerCase() === want) : undefined
+      if (want && !tab) return { result: `error: view "${id}" has no tab "${want}" (${view.detail.tabs.map(t => t.id).join(', ') || 'none'})` }
+      const state = await viewOpen($, id, key, tab?.id)
       return { result: state ? viewDetailText(view, state) : 'error: the view did not open' }
     }
     const filter = str(input.filter) || undefined
-    if (filter && !view.filters.some(f => f.id === filter)) return { result: `error: view "${id}" has no filter "${filter}" (${view.filters.map(f => f.id).join(', ') || 'none'})` }
-    const state = await viewSearch($, id, str(input.query), filter)
+    if (filter && filter.split(',').some(x => !view.filters.some(f => f.id === x.trim()))) return { result: `error: view "${id}" has no filter "${filter}" (${view.filters.map(f => f.id).join(', ') || 'none'})` }
+    const state = await viewSearch($, id, str(input.query), filter, Number(input.page) || 1)
     const list = state?.list
     if (!list || list.state !== 'ok') return { result: `error: ${list?.state === 'error' ? list.message : 'the search did not run'}` }
     const { items, total } = list.value as { items: unknown[]; total: number }

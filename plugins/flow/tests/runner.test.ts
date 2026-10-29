@@ -1443,3 +1443,13 @@ test('views: list_views finds view.yaml; open_view searches, then opens an item 
   expect(await call($, 'open_view', { id: 'nope' })).toContain('no view "nope"')
   expect(await call($, 'open_view', { id: 'people', filter: 'zz' })).toContain('has no filter "zz"')
 })
+
+test('views: a call auto mode refuses says which allow rule lets it through', async ($, on) => {
+  world(on, {
+    files: { [`${FLOWS}/people/view.yaml`]: PEOPLE },
+    mcp: () => ({ content: [{ type: 'text', text: '$.mcp.call(crm, search_people) refused: the auto mode classifier gave no verdict' }], isError: true }),
+  })
+  await begin($)
+  const out = await call($, 'open_view', { id: 'people', query: 'x' })
+  expect(out).toContain('Add "mcp__crm__search_people" to permissions.allow')
+})

@@ -754,3 +754,89 @@ detail:
     await ui.unmount()
   })
 }
+
+for (const surface of SURFACES) {
+  test(`a view's tabs, range, row action with confirm, and a form that saves (${surface})`, async ($, on) => {
+    world(on, {
+      [`${FLOWS}/clients/view.yaml`]: `
+title: Clients
+list:
+  mcp: { server: kh, tool: get, args: { path: /clients } }
+  items: data
+  key: id
+  title: "{{item.name}}"
+detail:
+  title: "{{client.name}}"
+  calls:
+    client: { server: kh, tool: get, args: { path: "/clients/{{key}}" } }
+  actions:
+    - id: rename
+      label: Rename
+      fields: [{ id: name, label: Name, required: true, default: "{{client.name}}" }]
+      mcp: { server: kh, tool: write, args: { method: PUT, path: "/clients/{{key}}", body: { name: "{{form.name}}" } } }
+      done: "Renamed to {{form.name}}"
+  tabs:
+    - id: reporting
+      title: Reporting
+      range: { modes: [week, month], default: month }
+      calls:
+        report: { server: kh, tool: get, args: { path: "/report/{{key}}", start: "{{range.start}}", end: "{{range.end}}" } }
+      sections:
+        - { title: Report, from: report, stats: [{ label: Calls, value: "{{report.calls}}" }] }
+    - id: admins
+      title: Admins
+      calls:
+        admins: { server: kh, tool: get, args: { path: "/admins/{{key}}" } }
+      sections:
+        - title: Admins
+          from: admins
+          table: { items: admins, columns: [{ label: Email, value: "{{row.email}}" }] }
+          row_actions:
+            - id: remove
+              label: Remove
+              style: danger
+              confirm: "Remove {{row.email}}?"
+              mcp: { server: kh, tool: write, args: { method: DELETE, path: "/admins/{{key}}/{{row.id}}" } }
+`,
+    })
+    const calls: { tool: string; args: Record<string, unknown> }[] = []
+    on('mcp.call', (_, e) => {
+      calls.push({ tool: e.tool, args: e.args })
+      const path = String(e.args.path)
+      const out =
+        e.tool === 'write' ? { ok: true }
+        : path === '/clients' ? { data: [{ id: 5, name: 'Acme' }] }
+        : path === '/clients/5' ? { name: 'Acme' }
+        : path === '/report/5' ? { calls: 12 }
+        : [{ id: 9, email: 'a@x.com' }]
+      return { value: { content: [{ type: 'text', text: JSON.stringify(out) }], isError: false } }
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'tab:views' })
+    await ui.press({ key: 'vopen:clients' })
+    await ui.press({ key: 'vrow:5' })
+    // The first tab's calls ran with its range: this month.
+    const report = calls.find(c => c.args.path === '/report/5')
+    expect(report?.args).toMatchObject({ start: '2026-10-01', end: '2026-10-31' })
+    expect(await ui.find({ type: 'Text', text: /^12$/ })).toBeTruthy()
+    await ui.press({ key: 'vrp' })
+    expect(calls.filter(c => c.args.path === '/report/5').at(-1)?.args).toMatchObject({ start: '2026-09-01', end: '2026-09-30' })
+    // Admins runs its own call; a row action asks first, then calls with the row.
+    await ui.press({ key: 'vt:admins' })
+    expect(calls.some(c => c.args.path === '/admins/5')).toBe(true)
+    await ui.press({ key: 'va:t:admins:0:r0:remove' })
+    expect(await ui.find({ type: 'Text', text: /^Remove a@x\.com\?$/ })).toBeTruthy()
+    expect(calls.some(c => c.tool === 'write')).toBe(false)
+    await ui.press({ key: 'vago:t:admins:0:r0:remove' })
+    expect(calls.find(c => c.tool === 'write')?.args).toEqual({ method: 'DELETE', path: '/admins/5/9' })
+    // A form opens with its default, and Save sends what was typed.
+    await ui.press({ key: 'va:page:rename' })
+    expect((await ui.find({ type: 'Input', key: 'fv:page:rename:name' }))?.props.value).toBe('Acme')
+    await ui.input({ key: 'fv:page:rename:name', text: 'Acme Co', kind: 'change' })
+    await ui.press({ key: 'vasv:page:rename' })
+    expect(calls.filter(c => c.tool === 'write').at(-1)?.args).toEqual({ method: 'PUT', path: '/clients/5', body: { name: 'Acme Co' } })
+    expect(await ui.find({ type: 'Text', text: /Renamed to Acme Co/ })).toBeTruthy()
+    await ui.unmount()
+  })
+}

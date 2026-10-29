@@ -334,7 +334,39 @@ export type HubOpenResults = Record<string, string[]>
 /** One MCP call of a view; every string in `args` is a template. */
 export type ViewCall = { server: string; tool: string; args: Record<string, unknown> }
 
-export type ViewFilter = { id: string; label: string; args: Record<string, unknown> }
+/** A filter button; one is on per group (the group's first by default). */
+export type ViewFilter = { id: string; label: string; group: string; args: Record<string, unknown> }
+
+/** A form field of an action; `default` is a template, filled when the form opens. */
+export type ViewField = {
+  id: string
+  label: string
+  type: 'text' | 'textarea' | 'number' | 'toggle' | 'select' | 'date'
+  options: { value: string; label: string }[]
+  default: string
+  required: boolean
+  help?: string
+}
+
+/** A button that calls a tool: a write, so it can ask to confirm, and can take a form first. */
+export type ViewAction = {
+  id: string
+  label: string
+  call: ViewCall
+  fields: ViewField[]
+  /** a template asked before the call runs ("Remove {{row.email}}?") */
+  confirm?: string
+  style: 'primary' | 'danger' | 'plain'
+  /** shown when the call succeeds; default "<label>: done" */
+  done?: string
+}
+
+export type ViewTable = { items: string; columns: { label: string; value: string }[]; empty: string; limit: number }
+
+/** A bar chart of a list: one bar per item, labelled and sized by templates. */
+export type ViewChart = { items: string; label: string; value: string; title?: string }
+
+export type ViewRange = { modes: ('week' | 'month' | 'year' | 'ytd')[]; default: 'week' | 'month' | 'year' | 'ytd' }
 
 /** A list of rows inside a detail section, or the view's own list. */
 export type ViewRows = {
@@ -360,6 +392,23 @@ export type ViewSection = {
   /** template lines; an empty line is not drawn */
   text: string[]
   rows?: ViewRows
+  table?: ViewTable
+  chart?: ViewChart
+  /** a path to an object whose keys and values are listed */
+  pairs?: string
+  /** buttons under the section; with rows or table, `row_actions` go on each row */
+  actions: ViewAction[]
+  row_actions: ViewAction[]
+}
+
+export type ViewTab = {
+  id: string
+  title: string
+  /** run when the tab opens (and again on Refresh or a range change) */
+  calls: Record<string, ViewCall>
+  range?: ViewRange
+  sections: ViewSection[]
+  actions: ViewAction[]
 }
 
 export type ViewSpec = {
@@ -376,12 +425,17 @@ export type ViewSpec = {
     key: string
     /** path to the total count in the list call's result */
     count?: string
+    /** previous and next buttons; {{page}} (from 1) fills the list call's args */
+    paged: boolean
   }
   detail?: {
     title: string
     subtitle?: string
     calls: Record<string, ViewCall>
+    actions: ViewAction[]
+    /** shown above the tabs, on every tab */
     sections: ViewSection[]
+    tabs: ViewTab[]
   }
 }
 
@@ -397,14 +451,26 @@ export type FoundView = {
 /** A call's result as the hub keeps it. */
 export type ViewPart = { state: 'loading' } | { state: 'ok'; value: unknown } | { state: 'error'; message: string }
 
+/** An action's form or confirm step, open on the page. */
+export type ViewOpenAction = { key: string; values: Record<string, string>; isConfirming: boolean; isRunning: boolean }
+
 /** What one view shows now: its search, list and open item. */
 export type ViewState = {
   query: string
+  /** the filter ids that are on, one per group, joined by commas */
   filter: string
+  page: number
   list: ViewPart
   /** the open item's key ('' for the list), and its detail calls by name */
   key: string
   detail: Record<string, ViewPart>
+  /** the open tab's id ('' for the first) */
+  tab: string
+  /** each tab's range: its mode and a date inside it (YYYY-MM-DD) */
+  ranges: Record<string, { mode: string; anchor: string }>
+  open?: ViewOpenAction
+  /** the last action's outcome, shown at the top of the page */
+  notice?: { ok: boolean; text: string }
 }
 
 declare module 'claude-code' {

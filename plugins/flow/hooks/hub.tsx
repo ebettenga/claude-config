@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { ChartData, Found, FoundView, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, ViewSpec, ViewState, Workflow } from '../types'
+import type { ChartData, Found, FoundView, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, ViewAction, ViewSection, ViewSpec, ViewState, Workflow } from '../types'
 import { LOGO_TEXT_PARTS, logoSvg } from './brand'
 import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
 import type { Table } from './charts'
@@ -53,8 +53,8 @@ import {
 import { checkEnv, openHub, showRun, showWorkflow } from './hub-state'
 import { SVG } from './icons'
 import { agentsView } from './progress'
-import { cancelRun, decideStep, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun, viewOpen, viewSearch } from './runner'
-import { fillView, getPath, pickRows } from './views'
+import { cancelRun, decideStep, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun, tabOf, tabRange, viewAction, viewOpen, viewRange, viewSearch, viewTab } from './runner'
+import { activeFilters, fillView, formDefaults, getPath, pickRows, withFilter } from './views'
 import { OTHER, addGroup, arrange, moveGroup, moveWorkflow, removeGroup, renameGroup, setGroup } from './layout'
 import type { Section } from './layout'
 import { STEP_KINDS, defaultValue, fill, inputProblems, isAIStep, stepLevels } from './spec'
@@ -189,6 +189,12 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     await openHub($)
     return { text: id && !hit ? `Flow chart opened. There is no workflow "${id}".` : 'Flow chart opened.' }
   })
+
+  // A fast wheel sums its ticks, and a sum past the end left the window below
+  // the tree, so the first ticks back up only ate the overshoot: clamp it.
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, ($, e, next) =>
+    next({ ...e, offset: Math.max(0, Math.min(e.offset, e.contentRows - e.bodyRows)) }),
+  )
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const els = $.ui.resolve(e)
@@ -453,43 +459,67 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     function viewBoard(view: ViewSpec): RenderChildren[] {
       const st = viewStates[view.id]
       const back = (label: string, press: () => void) => <Button key="vback" plain onPress={press}>{`← ${label}`}</Button>
-      if (st?.key && view.detail) return [back(view.title, () => void viewSearchBack(view.id)), ...viewDetail(view, st)]
-      return [back('Views', () => void update($, hubView, () => '')), ...viewListPage(view, st)]
+      const notice = st?.notice
+        ? card('vnotice', [
+            <Box key="vn" flexDirection="row" gap={1} alignItems="center">
+              <Box flexGrow={1} flexShrink={1} minWidth={0}><Text color={st.notice.ok ? C.add : C.del} wrap="wrap">{st.notice.text}</Text></Box>
+              <Button key="vn-x" plain onPress={() => void setState(view.id, s => ({ ...s, notice: undefined }))}>Dismiss</Button>
+            </Box>,
+          ], { fill: tint(st.notice.ok ? C.add : C.del, '14'), stroke: tint(st.notice.ok ? C.add : C.del, '66') })
+        : null
+      if (st?.key && view.detail) return [back(view.title, () => void viewSearchBack(view.id)), notice, ...viewDetail(view, st)]
+      return [back('Views', () => void update($, hubView, () => '')), notice, ...viewListPage(view, st)]
+    }
+
+    async function setState(id: string, change: (s: ViewState) => ViewState) {
+      await update($, viewStatesAtom, all => (all[id] ? { ...all, [id]: change(all[id]) } : all))
     }
 
     async function viewSearchBack(id: string) {
       // Back to the list as it was: the search is not run again.
-      await update($, viewStatesAtom, all => (all[id] ? { ...all, [id]: { ...all[id], key: '', detail: {} } } : all))
+      await setState(id, s => ({ ...s, key: '', detail: {}, open: undefined, notice: undefined }))
     }
 
     function viewListPage(view: ViewSpec, st: ViewState | undefined): RenderChildren[] {
       const query = st?.query ?? ''
-      const filter = st?.filter || view.filters[0]?.id || ''
+      const chosen = st?.filter ?? ''
+      const page = st?.page ?? 1
+      const isOn = new Set(activeFilters(view, chosen).map(f => f.id))
       const search = view.search
         ? Input
-          ? <Input key={`vq:${view.id}`} value={query} placeholder={view.search.placeholder} submitLabel="Search" onSubmit={(v: string) => void viewSearch($, view.id, v, filter)} />
+          ? <Input key={`vq:${view.id}`} value={query} placeholder={view.search.placeholder} submitLabel="Search" onSubmit={(v: string) => void viewSearch($, view.id, v, chosen)} />
           : <Text key="vq" dimColor>{`Ask Claude to search ${view.title}`}</Text>
         : null
-      const filters = view.filters.length
-        ? (
-            <Box key="vfilters" flexDirection="row" gap={1} flexWrap="wrap">
-              {view.filters.map(f => (
-                <Button key={`vf:${f.id}`} variant={f.id === filter ? 'primary' : 'secondary'} onPress={() => void viewSearch($, view.id, query, f.id)}>{f.label}</Button>
-              ))}
-            </Box>
-          )
-        : null
+      const groups = [...new Set(view.filters.map(f => f.group))]
+      const filters = groups.map(g => (
+        <Box key={`vfg:${g}`} flexDirection="row" gap={1} flexWrap="wrap">
+          {view.filters.filter(f => f.group === g).map(f => (
+            <Button key={`vf:${f.id}`} variant={isOn.has(f.id) ? 'primary' : 'secondary'} onPress={() => void viewSearch($, view.id, query, withFilter(view, chosen, f.id))}>{f.label}</Button>
+          ))}
+        </Box>
+      ))
       const list = st?.list
       const rows: RenderChildren[] = []
       let status: RenderChildren = null
+      let pager: RenderChildren = null
       if (!list || list.state === 'loading') status = <Text key="vst" dimColor>Looking…</Text>
       else if (list.state === 'error') status = <Text key="vst" color={C.del} wrap="wrap">{list.message}</Text>
       else {
         const { items, total } = list.value as { items: unknown[]; total: number }
-        status = <Text key="vst" dimColor size="footnote">{items.length ? `${total} found${total > items.length ? `, showing ${items.length}` : ''}` : view.list.rows.empty}</Text>
+        const limit = view.list.rows.limit
+        const shownFrom = view.list.paged ? (page - 1) * limit + 1 : 1
+        status = <Text key="vst" dimColor size="footnote">{items.length ? `${total} found${view.list.paged ? ` · ${shownFrom}–${shownFrom + items.length - 1}` : total > items.length ? `, showing ${items.length}` : ''}` : view.list.rows.empty}</Text>
+        if (view.list.paged && (page > 1 || items.length >= limit))
+          pager = (
+            <Box key="vpager" flexDirection="row" gap={1} alignItems="center">
+              <Button key="vprev" plain disabled={page <= 1} onPress={() => void viewSearch($, view.id, query, chosen, page - 1)}>← Previous</Button>
+              <Text dimColor size="footnote">{`Page ${page}`}</Text>
+              <Button key="vnext" plain disabled={items.length < limit || shownFrom + items.length - 1 >= total} onPress={() => void viewSearch($, view.id, query, chosen, page + 1)}>Next →</Button>
+            </Box>
+          )
         for (const item of items) {
           const key = String(getPath(item, view.list.key) ?? '')
-          const ctx = { item, query, filter }
+          const ctx = { item, query, filter: chosen, page }
           const title = fillView(view.list.rows.text, ctx).trim() || key
           const sub = view.list.rows.subtitle ? fillView(view.list.rows.subtitle, ctx).trim() : ''
           const dot = view.list.rows.dot ? Boolean(getPath(ctx, view.list.rows.dot)) : undefined
@@ -508,12 +538,181 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           )
         }
       }
-      return [heading(view.title, view.description ? clip(view.description, 80) : undefined), search, filters, status, ...rows]
+      return [heading(view.title, view.description ? clip(view.description, 80) : undefined), search, ...filters, status, ...rows, pager]
+    }
+
+    function actionButton(view: ViewSpec, action: ViewAction, akey: string, ctx: Record<string, unknown>) {
+      const press = () => {
+        if (!action.fields.length && !action.confirm) return void viewAction($, view.id, action, ctx)
+        void setState(view.id, s => ({ ...s, open: { key: akey, values: formDefaults(action.fields, ctx), isConfirming: !action.fields.length, isRunning: false } }))
+      }
+      return (
+        <Button key={`va:${akey}`} variant={action.style === 'primary' ? 'primary' : 'secondary'} plain={action.style === 'plain' ? true : undefined} onPress={press}>
+          {action.style === 'danger' ? <Text color={C.del}>{action.label}</Text> : action.label}
+        </Button>
+      )
+    }
+
+    /** The open action's form, or its confirm step. */
+    function actionForm(view: ViewSpec, st: ViewState, action: ViewAction, akey: string, ctx: Record<string, unknown>): RenderChildren {
+      const open = st.open?.key === akey ? st.open : undefined
+      if (!open) return null
+      const setValue = (fid: string, v: string) => void setState(view.id, s => (s.open?.key === akey ? { ...s, open: { ...s.open, values: { ...s.open.values, [fid]: v } } } : s))
+      const close = <Button key={`vac:${akey}`} plain onPress={() => void setState(view.id, s => ({ ...s, open: undefined }))}>Cancel</Button>
+      const full = { ...ctx, form: open.values }
+      if (open.isConfirming) {
+        const ask = action.confirm ? fillView(action.confirm, full) : `${action.label}?`
+        return (
+          card(`vaf:${akey}`, [
+            <Text key="ask" weight="semibold" bold wrap="wrap">{ask}</Text>,
+            <Box key="row" flexDirection="row" gap={1}>
+              <Button key={`vago:${akey}`} variant="primary" disabled={open.isRunning} onPress={() => void viewAction($, view.id, action, ctx, open.values)}>{open.isRunning ? 'Working…' : action.style === 'danger' ? `Yes, ${action.label.toLowerCase()}` : 'Confirm'}</Button>
+              {close}
+            </Box>,
+          ], action.style === 'danger' ? { stroke: tint(C.del, '88') } : {})
+        )
+      }
+      const fields = action.fields.map(f => {
+        const v = open.values[f.id] ?? ''
+        const label = <Text key={`fl:${f.id}`} dimColor size="footnote">{`${f.label}${f.required ? ' *' : ''}`}</Text>
+        let input: RenderChildren
+        if (f.type === 'toggle')
+          input = (
+            <Box key={`fi:${f.id}`} flexDirection="row" gap={1}>
+              <Button key={`ft:${akey}:${f.id}:y`} variant={v === 'true' ? 'primary' : 'secondary'} onPress={() => setValue(f.id, 'true')}>On</Button>
+              <Button key={`ft:${akey}:${f.id}:n`} variant={v !== 'true' ? 'primary' : 'secondary'} onPress={() => setValue(f.id, 'false')}>Off</Button>
+            </Box>
+          )
+        else if (f.type === 'select')
+          input = Select
+            ? <Select key={`fs:${akey}:${f.id}`} value={v} options={f.options.map(o => ({ value: o.value, label: o.label }))} onSelect={(x: string) => setValue(f.id, x)} />
+            : (
+                <Box key={`fi:${f.id}`} flexDirection="row" gap={1} flexWrap="wrap">
+                  {f.options.map(o => <Button key={`fo:${akey}:${f.id}:${o.value}`} variant={v === o.value ? 'primary' : 'secondary'} onPress={() => setValue(f.id, o.value)}>{o.label}</Button>)}
+                </Box>
+              )
+        else
+          input = Input
+            ? <Input key={`fv:${akey}:${f.id}`} value={v} placeholder={f.type === 'date' ? 'YYYY-MM-DD' : f.help ?? ''} {...(f.type === 'textarea' ? { rows: 4 } : {})} onInput={(x: string) => setValue(f.id, x)} onSubmit={(x: string) => setValue(f.id, x)} />
+            : <Text key={`fi:${f.id}`}>{v || '—'}</Text>
+        return (
+          <Box key={`ff:${f.id}`} flexDirection="column">
+            {label}
+            {input}
+            {f.help && f.type !== 'text' ? <Text dimColor size="caption">{f.help}</Text> : null}
+          </Box>
+        )
+      })
+      const save = action.confirm
+        ? <Button key={`vasv:${akey}`} variant="primary" onPress={() => void setState(view.id, s => (s.open?.key === akey ? { ...s, open: { ...s.open, isConfirming: true } } : s))}>Continue</Button>
+        : <Button key={`vasv:${akey}`} variant="primary" disabled={open.isRunning} onPress={() => void viewAction($, view.id, action, ctx, open.values)}>{open.isRunning ? 'Saving…' : 'Save'}</Button>
+      return card(`vaf:${akey}`, [<Text key="t" weight="bold" bold>{action.label}</Text>, ...fields, <Box key="row" flexDirection="row" gap={1}>{save}{close}</Box>])
+    }
+
+    /** A row of action buttons, then the open one's form or confirm step under it. */
+    function actionsRow(view: ViewSpec, st: ViewState, actions: ViewAction[], prefix: string, ctx: Record<string, unknown>): RenderChildren[] {
+      if (!actions.length) return []
+      const open = actions.find(a => st.open?.key === `${prefix}:${a.id}`)
+      return [
+        <Box key={`var:${prefix}`} flexDirection="row" gap={1} flexWrap="wrap">{actions.map(a => actionButton(view, a, `${prefix}:${a.id}`, ctx))}</Box>,
+        open ? actionForm(view, st, open, `${prefix}:${open.id}`, ctx) : null,
+      ]
+    }
+
+    function sectionCard(view: ViewSpec, st: ViewState, sec: ViewSection, sk: string, ctx: Record<string, unknown>) {
+      const part = sec.from ? st.detail[sec.from] : undefined
+      const parts: RenderChildren[] = [<Text key={`sh:${sk}`} size="footnote" weight="bold" dimColor>{sec.title.toUpperCase()}</Text>]
+      if (part?.state === 'loading') parts.push(<Text key={`sl:${sk}`} dimColor>Loading…</Text>)
+      else if (part?.state === 'error') parts.push(<Text key={`se:${sk}`} color={C.del} wrap="wrap">{part.message}</Text>)
+      else {
+        if (sec.stats.length)
+          parts.push(
+            <Box key={`ss:${sk}`} flexDirection="row" gap={isDesktop ? 'lg' : 2} flexWrap="wrap">
+              {sec.stats.map((stat, i) => (
+                <Box key={`st:${sk}:${i}`} flexDirection="column" minWidth={isDesktop ? 96 : 12}>
+                  <Text dimColor size="caption">{stat.label}</Text>
+                  <Text weight="semibold" bold>{fillView(stat.value, ctx).trim() || '—'}</Text>
+                </Box>
+              ))}
+            </Box>,
+          )
+        sec.text.forEach((t, i) => {
+          const filled = fillView(t, ctx).trim()
+          if (filled) parts.push(<Text key={`stx:${sk}:${i}`} wrap="wrap" dimColor={i > 0}>{filled}</Text>)
+        })
+        if (sec.pairs) {
+          const obj = getPath(ctx, sec.pairs)
+          const entries = obj && typeof obj === 'object' && !Array.isArray(obj) ? Object.entries(obj as Record<string, unknown>) : []
+          if (!entries.length) parts.push(<Text key={`sp0:${sk}`} dimColor>Nothing set.</Text>)
+          for (const [k, v] of entries)
+            parts.push(
+              <Text key={`sp:${sk}:${k}`} wrap="wrap"><Text dimColor>{`${k.replace(/_/g, ' ')}: `}</Text>{v === null || v === undefined ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v)}</Text>,
+            )
+        }
+        if (sec.chart) {
+          const { items } = pickRows({ items: sec.chart.items, text: '', empty: '', limit: 30 }, ctx)
+          const labels = items.map(row => fillView(sec.chart?.label ?? '', { ...ctx, row }).trim() || '?')
+          const values = items.map(row => Number(fillView(sec.chart?.value ?? '', { ...ctx, row })) || 0)
+          parts.push(
+            items.length
+              ? chartBlock({ key: `vc:${sk}`, title: sec.chart.title ?? '', data: { type: 'bar', title: sec.chart.title ?? sec.title, labels, series: [{ name: sec.title, values }] } })
+              : <Text key={`sc0:${sk}`} dimColor>Nothing to chart.</Text>,
+          )
+        }
+        if (sec.table) {
+          const t = sec.table
+          const { items, total } = pickRows({ items: t.items, text: '', empty: '', limit: t.limit }, ctx)
+          if (!items.length) parts.push(<Text key={`st0:${sk}`} dimColor>{t.empty}</Text>)
+          else if (!sec.row_actions.length)
+            parts.push(
+              <Markdown
+                key={`stm:${sk}`}
+                text={tableMarkdown({ header: t.columns.map(c => c.label), rows: items.map(row => t.columns.map(c => fillView(c.value, { ...ctx, row }))) }, t.limit, 10, isDesktop ? 40 : 18)}
+              />,
+            )
+          else
+            items.forEach((row, i) => {
+              const rctx = { ...ctx, row }
+              const cells = t.columns.map(c => fillView(c.value, rctx).trim()).filter(Boolean)
+              parts.push(
+                <Box key={`str:${sk}:${i}`} flexDirection="column" paddingTop={i ? 'xs' : 0}>
+                  <Text wrap="wrap"><Text weight="semibold" bold>{cells[0] ?? ''}</Text><Text dimColor>{cells.length > 1 ? ` · ${cells.slice(1).join(' · ')}` : ''}</Text></Text>
+                  {actionsRow(view, st, sec.row_actions, `${sk}:r${i}`, rctx)}
+                </Box>,
+              )
+            })
+          if (total > items.length) parts.push(<Text key={`stmore:${sk}`} dimColor size="footnote">{`${total - items.length} more`}</Text>)
+        }
+        if (sec.rows) {
+          const { items, total } = pickRows(sec.rows, ctx)
+          if (!items.length) parts.push(<Text key={`sre:${sk}`} dimColor>{sec.rows.empty}</Text>)
+          items.forEach((row, i) => {
+            const rctx = { ...ctx, row }
+            const dot = sec.rows?.dot ? Boolean(getPath(rctx, sec.rows.dot)) : undefined
+            const sub2 = sec.rows?.subtitle ? fillView(sec.rows.subtitle, rctx).trim() : ''
+            parts.push(
+              <Box key={`sr:${sk}:${i}`} flexDirection="row" gap={1}>
+                {dot === undefined ? null : <Text color={dot ? C.add : C.border}>{dot ? '●' : '○'}</Text>}
+                <Box flexDirection="column" flexShrink={1} minWidth={0}>
+                  <Text wrap="truncate-end">{fillView(sec.rows?.text ?? '', rctx)}</Text>
+                  {sub2 ? <Text dimColor size="footnote" wrap="truncate-end">{sub2}</Text> : null}
+                  {sec.row_actions.length ? actionsRow(view, st, sec.row_actions, `${sk}:r${i}`, rctx) : null}
+                </Box>
+              </Box>,
+            )
+          })
+          if (total > items.length) parts.push(<Text key={`srm:${sk}`} dimColor size="footnote">{`${total - items.length} more`}</Text>)
+        }
+        parts.push(...actionsRow(view, st, sec.actions, sk, ctx))
+      }
+      return card(`vsec:${sk}`, parts)
     }
 
     function viewDetail(view: ViewSpec, st: ViewState): RenderChildren[] {
       const d = view.detail as NonNullable<ViewSpec['detail']>
-      const ctx: Record<string, unknown> = { key: st.key, query: st.query, filter: st.filter }
+      const tab = tabOf(view, st)
+      const range = tabRange(tab, st, new Date(now).toISOString().slice(0, 10))
+      const ctx: Record<string, unknown> = { key: st.key, query: st.query, filter: st.filter, ...(range ? { range } : {}) }
       for (const [name, part] of Object.entries(st.detail)) if (part.state === 'ok') ctx[name] = part.value
       const title = fillView(d.title, ctx).trim() || st.key
       const sub = d.subtitle ? fillView(d.subtitle, ctx).trim() : ''
@@ -527,50 +726,36 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           {refresh}
         </Box>
       )
-      const sections = d.sections.map((sec, si) => {
-        const part = sec.from ? st.detail[sec.from] : undefined
-        const parts: RenderChildren[] = [<Text key={`sh:${si}`} size="footnote" weight="bold" dimColor>{sec.title.toUpperCase()}</Text>]
-        if (part?.state === 'loading') parts.push(<Text key={`sl:${si}`} dimColor>Loading…</Text>)
-        else if (part?.state === 'error') parts.push(<Text key={`se:${si}`} color={C.del} wrap="wrap">{part.message}</Text>)
-        else {
-          if (sec.stats.length)
-            parts.push(
-              <Box key={`ss:${si}`} flexDirection="row" gap={isDesktop ? 'lg' : 2} flexWrap="wrap">
-                {sec.stats.map((stat, i) => (
-                  <Box key={`st:${si}:${i}`} flexDirection="column" minWidth={isDesktop ? 96 : 12}>
-                    <Text dimColor size="caption">{stat.label}</Text>
-                    <Text weight="semibold" bold>{fillView(stat.value, ctx).trim() || '—'}</Text>
-                  </Box>
-                ))}
-              </Box>,
-            )
-          sec.text.forEach((t, i) => {
-            const filled = fillView(t, ctx).trim()
-            if (filled) parts.push(<Text key={`stx:${si}:${i}`} wrap="wrap" dimColor={i > 0}>{filled}</Text>)
-          })
-          if (sec.rows) {
-            const { items, total } = pickRows(sec.rows, ctx)
-            if (!items.length) parts.push(<Text key={`sre:${si}`} dimColor>{sec.rows.empty}</Text>)
-            items.forEach((row, i) => {
-              const rctx = { ...ctx, row }
-              const dot = sec.rows?.dot ? Boolean(getPath(rctx, sec.rows.dot)) : undefined
-              const sub2 = sec.rows?.subtitle ? fillView(sec.rows.subtitle, rctx).trim() : ''
-              parts.push(
-                <Box key={`sr:${si}:${i}`} flexDirection="row" gap={1}>
-                  {dot === undefined ? null : <Text color={dot ? C.add : C.border}>{dot ? '●' : '○'}</Text>}
-                  <Box flexDirection="column" flexShrink={1} minWidth={0}>
-                    <Text wrap="truncate-end">{fillView(sec.rows?.text ?? '', rctx)}</Text>
-                    {sub2 ? <Text dimColor size="footnote" wrap="truncate-end">{sub2}</Text> : null}
-                  </Box>
-                </Box>,
-              )
-            })
-            if (total > items.length) parts.push(<Text key={`srm:${si}`} dimColor size="footnote">{`${total - items.length} more`}</Text>)
-          }
-        }
-        return card(`vsec:${si}`, parts)
-      })
-      return [head, ...sections]
+      const tabsBar = d.tabs.length > 1
+        ? (
+            <Box key="vtabs" flexDirection="row" gap={1} flexWrap="wrap">
+              {d.tabs.map(t => <Button key={`vt:${t.id}`} variant={t.id === tab?.id ? 'primary' : 'secondary'} onPress={() => void viewTab($, view.id, t.id)}>{t.title}</Button>)}
+            </Box>
+          )
+        : null
+      const rangeBar = tab?.range && range
+        ? (
+            <Box key="vrange" flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+              {tab.range.modes.length > 1
+                ? tab.range.modes.map(m => (
+                    <Button key={`vrm:${m}`} variant={range.mode === m ? 'primary' : 'secondary'} onPress={() => void viewRange($, view.id, { mode: m })}>{m === 'ytd' ? 'Year to date' : m[0]?.toUpperCase() + m.slice(1)}</Button>
+                  ))
+                : null}
+              <Button key="vrp" plain onPress={() => void viewRange($, view.id, { by: -1 })}>←</Button>
+              <Text weight="semibold" bold>{range.label}</Text>
+              <Button key="vrn" plain onPress={() => void viewRange($, view.id, { by: 1 })}>→</Button>
+            </Box>
+          )
+        : null
+      return [
+        head,
+        ...actionsRow(view, st, d.actions, 'page', ctx),
+        ...d.sections.map((sec, i) => sectionCard(view, st, sec, `p${i}`, ctx)),
+        tabsBar,
+        rangeBar,
+        ...actionsRow(view, st, tab?.actions ?? [], `t:${tab?.id ?? ''}`, ctx),
+        ...(tab?.sections ?? []).map((sec, i) => sectionCard(view, st, sec, `t:${tab?.id}:${i}`, ctx)),
+      ]
     }
 
     // ── 1. Workflows ──
@@ -807,19 +992,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           <Text dimColor size="footnote">{[wf.owner, wf.tags.join(', '), `${fixed} fixed, ${ai} AI step${ai === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}</Text>
           {wf.description ? <Markdown key={`desc:${wf.id}`} text={wf.description} /> : null}
         </Box>,
-        chartCard(wf),
-        wf.inputs.length ? card('inputs', [heading('Inputs', String(wf.inputs.length)), ...fields], {}) : null,
-        problems.length ? <Box flexDirection="column" gap="xs">{problems.map((p, i) => note(`problem:${i}`, '!', p, C.dirty))}</Box> : null,
-        wf.steps.some(s => s.kind === 'agent')
-          ? note('agents-headless', 'i', 'Agent steps run a headless Claude with only the tools and folders the step lists: no commands, no MCP, writes only to the run folder (and its write: folders), stopped at its budget.', C.read)
-          : null,
-        wf.env.length
-          ? (
-              <Box flexDirection="column" gap="xs">
-                {wf.env.map(n => (env[n] ? note(`envok:${n}`, '✓', `${n} is set`, C.add) : note(`envno:${n}`, '!', `${n} is not set`, C.dirty)))}
-              </Box>
-            )
-          : null,
+        // The actions sit under the title, so Run never needs a scroll to reach.
         <Box flexDirection="row" gap={1} flexWrap="wrap">
           <Button key="run-workflow" variant="primary" onPress={() => void runWorkflow(wf)}>Run workflow</Button>
           <Button key="ask-change" onPress={() => fillPrompt(`Change the flow workflow "${wf.title}" (${tildify(f.dir, home)}/flow.yaml): `)}>Ask Claude to change it</Button>
@@ -834,6 +1007,19 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
               )
             : null}
         </Box>,
+        problems.length ? <Box flexDirection="column" gap="xs">{problems.map((p, i) => note(`problem:${i}`, '!', p, C.dirty))}</Box> : null,
+        chartCard(wf),
+        wf.inputs.length ? card('inputs', [heading('Inputs', String(wf.inputs.length)), ...fields], {}) : null,
+        wf.steps.some(s => s.kind === 'agent')
+          ? note('agents-headless', 'i', 'Agent steps run a headless Claude with only the tools and folders the step lists: no commands, no MCP, writes only to the run folder (and its write: folders), stopped at its budget.', C.read)
+          : null,
+        wf.env.length
+          ? (
+              <Box flexDirection="column" gap="xs">
+                {wf.env.map(n => (env[n] ? note(`envok:${n}`, '✓', `${n} is set`, C.add) : note(`envno:${n}`, '!', `${n} is not set`, C.dirty)))}
+              </Box>
+            )
+          : null,
       ]
     }
 
