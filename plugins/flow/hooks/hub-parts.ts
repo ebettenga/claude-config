@@ -195,9 +195,13 @@ export function stepCounts(wf: Workflow): { fixed: number; ai: number } {
 export function stepSub(spec: StepSpec, itemCount?: number): string {
   const parts: string[] = []
   switch (spec.kind) {
-    case 'run':
-      parts.push(firstLine(spec.body))
+    case 'run': {
+      // A one-liner shows as written; a script by its size, not its first brace.
+      const lines = spec.body.split('\n').filter(l => l.trim())
+      const first = firstLine(spec.body)
+      parts.push(lines.length > 1 || first.length < 3 ? `shell script · ${lines.length} line${lines.length === 1 ? '' : 's'}` : first)
       break
+    }
     case 'python':
       parts.push(spec.python?.file ?? 'inline python')
       break

@@ -767,22 +767,24 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           {s.mark ? <Text color={s.mark.color} weight="bold" size="footnote">{s.mark.glyph}</Text> : null}
         </Box>
       )
-      // On a run, the whole step is one press: it shows that step's log, live or not.
-      const body = run
-        ? (
-            <Button key={`step:${spec.id}`} plain onPress={() => void update($, hubLogStep, () => spec.id)}>
-              <Text color={s.color} size="caption" weight="bold">{`● ${spec.kind.toUpperCase()}${isAIStep(spec) ? '  AI' : ''}${s.mark ? `  ${s.mark.glyph}` : ''}\n`}</Text>
-              <Text weight="semibold" color={s.titleColor} dimColor={s.isDim} wrap="truncate-end">{spec.title}</Text>
-              {s.sub ? <Text dimColor size="footnote" wrap="truncate-end">{`\n${s.sub}`}</Text> : ''}
-            </Button>
-          )
-        : (
-            <Box flexDirection="column" minWidth={0} overflow="hidden">
-              {kindLine}
-              <Text weight="semibold" wrap="truncate-end">{spec.title}</Text>
-              {s.sub ? <Text dimColor size="footnote" wrap="truncate-end">{s.sub}</Text> : null}
-            </Box>
-          )
+      // On a run, the title is a full-width press that shows that step's log,
+      // live or not; the kind line keeps its colours (a Button's text is drawn
+      // plain on desktop, so the coloured parts stay outside it).
+      const body = (
+        <Box flexDirection="column" minWidth={0} overflow="hidden">
+          {kindLine}
+          {run
+            ? (
+                <Box flexGrow={1} minWidth={0} overflow="hidden">
+                  <Button key={`step:${spec.id}`} plain onPress={() => void update($, hubLogStep, () => spec.id)}>
+                    <Text weight="semibold" color={s.titleColor} dimColor={s.isDim} wrap="truncate-end">{spec.title}</Text>
+                  </Button>
+                </Box>
+              )
+            : <Text weight="semibold" wrap="truncate-end">{spec.title}</Text>}
+          {s.sub ? <Text dimColor size="footnote" wrap="truncate-end">{s.sub}</Text> : null}
+        </Box>
+      )
       return (
         <Box
           key={`chip:${spec.id}`}
