@@ -1380,3 +1380,66 @@ test('mcp: a server no Claude Code config sets up refuses the run and points at 
   w.files.set(`${HOME}/.claude.json`, JSON.stringify({ mcpServers: {}, projects: { '/repo': { mcpServers: { 'team': {} } } } }))
   await start($, 'dash')
 })
+
+// ---------------------------------------------------------------------------
+// views: view.yaml beside workflows, searched and opened through MCP
+
+const PEOPLE = `
+title: People
+search: { placeholder: Name }
+filters:
+  - { id: active, label: Active, args: { active: true } }
+list:
+  mcp: { server: crm, tool: search_people, args: { search: "{{query}}" } }
+  items: people
+  key: id
+  title: "{{item.name}}"
+  subtitle: "{{item.state}}"
+detail:
+  title: "{{profile.name}} (#{{key}})"
+  calls:
+    profile: { server: crm, tool: get_person, args: { id: "{{key}}" } }
+    open: { server: crm, tool: open_items, args: { id: "{{key}}" } }
+  sections:
+    - title: Profile
+      from: profile
+      stats: [{ label: Rate, value: "{{profile.rate | percent}}" }]
+    - title: Open
+      from: open
+      rows: { items: open.rows, text: "{{row.status}}", empty: Nothing open. }
+`
+
+test('views: list_views finds view.yaml; open_view searches, then opens an item as text', async ($, on) => {
+  const w = world(on, {
+    files: { [`${FLOWS}/people/view.yaml`]: PEOPLE, [`${FLOWS}/broken/view.yaml`]: 'title: B\nlist: {}\n' },
+    mcp: e => {
+      const text =
+        e.tool === 'search_people'
+          ? JSON.stringify({ people: [{ id: 7, name: 'Sam', state: 'active' }, { id: 8, name: 'Ada', state: 'away' }] })
+          : e.tool === 'get_person'
+            ? JSON.stringify({ name: 'Sam', rate: 0.5 })
+            : 'Unknown tool: open_items'
+      return { content: [{ type: 'text', text }], isError: e.tool === 'open_items' }
+    },
+  })
+  await begin($)
+  const views = JSON.parse(await call($, 'list_views', {})) as { id: string; errors: string[]; filters: { id: string }[] }[]
+  expect(views.map(v => v.id)).toEqual(['broken', 'people'])
+  expect(views[0]?.errors.join('\n')).toContain('list.items: is empty')
+  expect(views[1]?.filters.map(f => f.id)).toEqual(['active'])
+
+  const found = await call($, 'open_view', { id: 'people', query: 'sa' })
+  expect(found).toContain('2 found')
+  expect(found).toContain('- 7: Sam (active)')
+  expect(w.mcpCalls.at(-1)).toEqual({ server: 'crm', tool: 'search_people', args: { search: 'sa', active: true } })
+
+  const detail = await call($, 'open_view', { id: 'people', key: '7' })
+  expect(detail).toContain('Sam (#7)')
+  expect(detail).toContain('- Rate: 50%')
+  // A tool the server does not have says so, in its own section.
+  expect(detail).toContain('crm has no tool open_items yet')
+  expect(w.mcpCalls.filter(c => c.tool === 'get_person')[0]?.args).toEqual({ id: 7 })
+
+  expect(await call($, 'open_view', { id: 'nope' })).toContain('no view "nope"')
+  expect(await call($, 'open_view', { id: 'people', filter: 'zz' })).toContain('has no filter "zz"')
+})

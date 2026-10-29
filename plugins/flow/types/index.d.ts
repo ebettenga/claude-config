@@ -297,7 +297,7 @@ export type Run = {
 // ---------------------------------------------------------------------------
 // The /flow-chart hub pane (hooks/hub.tsx).
 
-export type HubTab = 'workflows' | 'runs' | 'agents' | 'skills'
+export type HubTab = 'workflows' | 'views' | 'runs' | 'agents' | 'skills'
 
 /** The inline file browser under a file or folder input. */
 /** The open file chooser: suggestions (with a search) or the folder browser. */
@@ -327,6 +327,86 @@ export type HubAttempts = Record<string, string[]>
 /** By run id: the Results blocks (output paths) shown collapsed. */
 export type HubOpenResults = Record<string, string[]>
 
+// ---------------------------------------------------------------------------
+// Views (view.yaml): a search, a list and a detail page over MCP tool calls,
+// drawn on the hub's Views tab. hooks/views.ts parses and fills them.
+
+/** One MCP call of a view; every string in `args` is a template. */
+export type ViewCall = { server: string; tool: string; args: Record<string, unknown> }
+
+export type ViewFilter = { id: string; label: string; args: Record<string, unknown> }
+
+/** A list of rows inside a detail section, or the view's own list. */
+export type ViewRows = {
+  /** path to the array: `requests.requests`, or `peers` in the list call's result */
+  items: string
+  /** template for each row's line (`{{row.status}}`; `{{item.x}}` in the view's list) */
+  text: string
+  /** an optional second, dimmer line */
+  subtitle?: string
+  /** path to a value that, when true, draws the row's dot green */
+  dot?: string
+  empty: string
+  limit: number
+}
+
+export type ViewStat = { label: string; value: string }
+
+export type ViewSection = {
+  title: string
+  /** the detail call this section waits on (its loading and errors show here) */
+  from?: string
+  stats: ViewStat[]
+  /** template lines; an empty line is not drawn */
+  text: string[]
+  rows?: ViewRows
+}
+
+export type ViewSpec = {
+  id: string
+  title: string
+  description: string
+  owner: string
+  search?: { placeholder: string }
+  filters: ViewFilter[]
+  list: {
+    call: ViewCall
+    rows: ViewRows
+    /** path to the item's key, passed to the detail page as {{key}} */
+    key: string
+    /** path to the total count in the list call's result */
+    count?: string
+  }
+  detail?: {
+    title: string
+    subtitle?: string
+    calls: Record<string, ViewCall>
+    sections: ViewSection[]
+  }
+}
+
+export type FoundView = {
+  id: string
+  dir: string
+  file: string
+  view?: ViewSpec
+  errors: string[]
+  source?: string
+}
+
+/** A call's result as the hub keeps it. */
+export type ViewPart = { state: 'loading' } | { state: 'ok'; value: unknown } | { state: 'error'; message: string }
+
+/** What one view shows now: its search, list and open item. */
+export type ViewState = {
+  query: string
+  filter: string
+  list: ViewPart
+  /** the open item's key ('' for the list), and its detail calls by name */
+  key: string
+  detail: Record<string, ViewPart>
+}
+
 declare module 'claude-code' {
   interface PluginState {
     flow: {
@@ -336,6 +416,11 @@ declare module 'claude-code' {
       progressNow: number
       // workflow state is added below
       workflows: Shaped<Found[]>
+      views: Shaped<FoundView[]>
+      /** Each view's search, list and open item, by view id. */
+      viewStates: Shaped<Record<string, ViewState>>
+      /** The view open on the Views tab ('' for the list). */
+      hubView: Shaped<string>
       /** Newest first, at most 30. */
       runs: Shaped<Run[]>
       // the hub pane

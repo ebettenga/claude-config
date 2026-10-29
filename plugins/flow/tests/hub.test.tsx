@@ -702,3 +702,55 @@ test('the Agents tab lists the flow plan, and the band button opens and closes i
   await band.press({ key: 'flow-agents' })
   expect(w.panes).toEqual([])
 })
+
+for (const surface of SURFACES) {
+  test(`the Views tab: search a view, open an item, and go back to the list (${surface})`, async ($, on) => {
+    world(on, {
+      [`${FLOWS}/people/view.yaml`]: `
+title: People
+description: Find someone.
+search: { placeholder: Name }
+filters:
+  - { id: active, label: Active, args: { active: true } }
+  - { id: all, label: Everyone }
+list:
+  mcp: { server: crm, tool: search_people, args: { search: "{{query}}" } }
+  items: people
+  key: id
+  title: "{{item.name}}"
+  subtitle: "#{{item.id}}"
+  dot: item.on
+detail:
+  title: "{{profile.name}}"
+  calls:
+    profile: { server: crm, tool: get_person, args: { id: "{{key}}" } }
+  sections:
+    - title: Profile
+      from: profile
+      stats: [{ label: Rate, value: "{{profile.rate | percent}}" }]
+      text: ["{{profile.about}}"]
+`,
+    })
+    const calls: { tool: string; args: Record<string, unknown> }[] = []
+    on('mcp.call', (_, e) => {
+      calls.push({ tool: e.tool, args: e.args })
+      const text = e.tool === 'search_people' ? JSON.stringify({ people: [{ id: 7, name: 'Sam', on: true }] }) : JSON.stringify({ name: 'Sam', rate: 0.42, about: 'Listens well.' })
+      return { value: { content: [{ type: 'text', text }], isError: false } }
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'tab:views' })
+    await ui.press({ key: 'vopen:people' })
+    expect(calls[0]).toEqual({ tool: 'search_people', args: { active: true } })
+    expect(await ui.find({ type: 'Text', text: /^Sam$/ })).toBeTruthy()
+    await ui.press({ key: 'vf:all' })
+    expect(calls.at(-1)?.args).toEqual({})
+    await ui.press({ key: 'vrow:7' })
+    expect(calls.at(-1)).toEqual({ tool: 'get_person', args: { id: 7 } })
+    expect(await ui.find({ type: 'Text', text: /^42%$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /Listens well\./ })).toBeTruthy()
+    await ui.press({ key: 'vback' })
+    expect(await ui.find({ type: 'Button', key: 'vrow:7' })).toBeTruthy()
+    await ui.unmount()
+  })
+}

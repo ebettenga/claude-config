@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { ChartData, Found, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, Workflow } from '../types'
+import type { ChartData, Found, FoundView, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, ViewSpec, ViewState, Workflow } from '../types'
 import { LOGO_TEXT_PARTS, logoSvg } from './brand'
 import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
 import type { Table } from './charts'
@@ -53,7 +53,8 @@ import {
 import { checkEnv, openHub, showRun, showWorkflow } from './hub-state'
 import { SVG } from './icons'
 import { agentsView } from './progress'
-import { cancelRun, decideStep, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun } from './runner'
+import { cancelRun, decideStep, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun, viewOpen, viewSearch } from './runner'
+import { fillView, getPath, pickRows } from './views'
 import { OTHER, addGroup, arrange, moveGroup, moveWorkflow, removeGroup, renameGroup, setGroup } from './layout'
 import type { Section } from './layout'
 import { STEP_KINDS, defaultValue, fill, inputProblems, isAIStep, stepLevels } from './spec'
@@ -78,6 +79,9 @@ const agentsAtom = atom({ plugin: 'flow', key: 'progressAgents' } as const, [])
 const hubTab = atom({ plugin: 'flow', key: 'hubTab' } as const, 'workflows' as HubTab, { shape: 'hub-tab-1' })
 const hubWorkflow = atom({ plugin: 'flow', key: 'hubWorkflow' } as const, '', { shape: 'hub-workflow-1' })
 const hubRun = atom({ plugin: 'flow', key: 'hubRun' } as const, '', { shape: 'hub-run-1' })
+const hubView = atom({ plugin: 'flow', key: 'hubView' } as const, '', { shape: 'hub-view-1' })
+const viewsAtom = atom({ plugin: 'flow', key: 'views' } as const, [] as FoundView[], { shape: 'views-1' })
+const viewStatesAtom = atom({ plugin: 'flow', key: 'viewStates' } as const, {} as Record<string, ViewState>, { shape: 'view-states-1' })
 const hubForms = atom({ plugin: 'flow', key: 'hubForms' } as const, {} as HubForms, { shape: 'hub-forms-1' })
 const hubPicker = atom({ plugin: 'flow', key: 'hubPicker' } as const, null as HubPicker | null, { shape: 'hub-picker-2' })
 const hubQuery = atom({ plugin: 'flow', key: 'hubQuery' } as const, '', { shape: 'hub-query-1' })
@@ -112,6 +116,7 @@ async function refresh($: $): Promise<Found[]> {
 async function goTab($: $, tab: HubTab): Promise<void> {
   if (tab === 'workflows') await update($, hubWorkflow, () => '')
   if (tab === 'runs') await update($, hubRun, () => '')
+  if (tab === 'views') await update($, hubView, () => '')
   await update($, hubTab, () => tab)
   // The last list shows at once; the fresh one replaces it once read.
   if (tab === 'skills') await reloadCatalog($)
@@ -215,6 +220,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       read($, hubArrange),
       read($, hubFolded),
     ])
+    const [views, viewStates, viewId] = await Promise.all([read($, viewsAtom), read($, viewStatesAtom), read($, hubView)])
     const now = await $.clock.now()
     const cwd = await $.session.cwd().catch(() => '')
     const home = ((await $.env.get('HOME').catch(() => undefined)) ?? '').replace(/\/+$/, '')
@@ -226,7 +232,10 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     let body: RenderChildren[]
     const openWf = wfId ? loaded.find(f => f.id === wfId) : undefined
     const openRun = runId ? runs.find(r => r.id === runId) : undefined
-    if (tab === 'workflows' && openWf) body = await workflowBoard(openWf)
+    const openView = viewId ? views.find(v => v.id === viewId && v.view) : undefined
+    if (tab === 'views' && openView?.view) body = viewBoard(openView.view)
+    else if (tab === 'views') body = [tabsRow(), ...viewsList()]
+    else if (tab === 'workflows' && openWf) body = await workflowBoard(openWf)
     else if (tab === 'workflows') body = [runningCard(), tabsRow(), ...workflowsList()]
     else if (tab === 'runs' && openRun) body = [tabsRow(), ...(await runBoard(openRun))]
     else if (tab === 'runs') body = [tabsRow(), ...runsList()]
@@ -240,7 +249,9 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     const where =
       tab === 'workflows'
         ? openWf ? 'workflow' : plural(loaded.length, 'workflow')
-        : tab === 'runs'
+        : tab === 'views'
+          ? openView ? 'view' : plural(views.length, 'view')
+          : tab === 'runs'
           ? openRun ? 'run' : active.length ? `${active.length} running` : plural(runs.length, 'run')
           : tab === 'agents'
             ? agentsRunning ? `${agentsRunning} running` : plural(agentList.length, 'agent')
@@ -384,6 +395,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       return (
         <Box flexDirection="row" gap={1}>
           <Button key="tab:workflows" variant={tab === 'workflows' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'workflows')}>Workflows</Button>
+          {views.length ? <Button key="tab:views" variant={tab === 'views' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'views')}>Views</Button> : null}
           <Button key="tab:runs" variant={tab === 'runs' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'runs')}>{`Runs${active.length ? ` (${active.length})` : ''}`}</Button>
           <Button key="tab:agents" variant={tab === 'agents' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'agents')}>{`Agents${agentsRunning ? ` (${agentsRunning})` : ''}`}</Button>
           <Button key="tab:skills" variant={tab === 'skills' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'skills')}>Skills</Button>
@@ -404,6 +416,161 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     function clip(text: string, n: number) {
       const flat = text.replace(/\s+/g, ' ').trim()
       return flat.length > n ? `${flat.slice(0, Math.max(1, n - 1)).trimEnd()}…` : flat
+    }
+
+    // ── Views ──
+
+    function viewsList(): RenderChildren[] {
+      const broken = views.filter(v => !v.view)
+      return [
+        heading('Views', plural(views.length, 'view')),
+        ...views
+          .filter((v): v is FoundView & { view: ViewSpec } => Boolean(v.view))
+          .map(v =>
+            card(`view:${v.id}`, [
+              <Button key={`vopen:${v.id}`} plain label={v.view.title} onPress={() => void openViewPage(v.id)}>
+                <Text weight="bold" bold>{v.view.title}</Text>
+              </Button>,
+              v.view.description ? <Text key={`vd:${v.id}`} dimColor size="footnote" wrap="wrap">{clip(v.view.description, 220)}</Text> : null,
+              <Text key={`vs:${v.id}`} dimColor size="footnote">{[v.source ? `from ${v.source}` : null, v.view.owner || null].filter(Boolean).join(' · ') || ' '}</Text>,
+            ]),
+          ),
+        broken.length
+          ? card('view-errors', [
+              <Text size="footnote" weight="bold" color={C.del}>{`${plural(broken.length, 'VIEW')} DID NOT LOAD`}</Text>,
+              ...broken.flatMap(v => v.errors.map((err, i) => <Text key={`verr:${v.file}:${i}`} color={C.del} size="footnote">{`${tildify(v.file, home)}: ${err}`}</Text>)),
+            ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
+          : null,
+      ]
+    }
+
+    async function openViewPage(id: string) {
+      await update($, hubView, () => id)
+      const st = (await read($, viewStatesAtom))[id]
+      if (!st) await viewSearch($, id, '')
+    }
+
+    function viewBoard(view: ViewSpec): RenderChildren[] {
+      const st = viewStates[view.id]
+      const back = (label: string, press: () => void) => <Button key="vback" plain onPress={press}>{`← ${label}`}</Button>
+      if (st?.key && view.detail) return [back(view.title, () => void viewSearchBack(view.id)), ...viewDetail(view, st)]
+      return [back('Views', () => void update($, hubView, () => '')), ...viewListPage(view, st)]
+    }
+
+    async function viewSearchBack(id: string) {
+      // Back to the list as it was: the search is not run again.
+      await update($, viewStatesAtom, all => (all[id] ? { ...all, [id]: { ...all[id], key: '', detail: {} } } : all))
+    }
+
+    function viewListPage(view: ViewSpec, st: ViewState | undefined): RenderChildren[] {
+      const query = st?.query ?? ''
+      const filter = st?.filter || view.filters[0]?.id || ''
+      const search = view.search
+        ? Input
+          ? <Input key={`vq:${view.id}`} value={query} placeholder={view.search.placeholder} submitLabel="Search" onSubmit={(v: string) => void viewSearch($, view.id, v, filter)} />
+          : <Text key="vq" dimColor>{`Ask Claude to search ${view.title}`}</Text>
+        : null
+      const filters = view.filters.length
+        ? (
+            <Box key="vfilters" flexDirection="row" gap={1} flexWrap="wrap">
+              {view.filters.map(f => (
+                <Button key={`vf:${f.id}`} variant={f.id === filter ? 'primary' : 'secondary'} onPress={() => void viewSearch($, view.id, query, f.id)}>{f.label}</Button>
+              ))}
+            </Box>
+          )
+        : null
+      const list = st?.list
+      const rows: RenderChildren[] = []
+      let status: RenderChildren = null
+      if (!list || list.state === 'loading') status = <Text key="vst" dimColor>Looking…</Text>
+      else if (list.state === 'error') status = <Text key="vst" color={C.del} wrap="wrap">{list.message}</Text>
+      else {
+        const { items, total } = list.value as { items: unknown[]; total: number }
+        status = <Text key="vst" dimColor size="footnote">{items.length ? `${total} found${total > items.length ? `, showing ${items.length}` : ''}` : view.list.rows.empty}</Text>
+        for (const item of items) {
+          const key = String(getPath(item, view.list.key) ?? '')
+          const ctx = { item, query, filter }
+          const title = fillView(view.list.rows.text, ctx).trim() || key
+          const sub = view.list.rows.subtitle ? fillView(view.list.rows.subtitle, ctx).trim() : ''
+          const dot = view.list.rows.dot ? Boolean(getPath(ctx, view.list.rows.dot)) : undefined
+          // A Button holds only text: the dot and the second line sit beside it.
+          const name = view.detail && key
+            ? <Button key={`vrow:${key}`} plain label={title} onPress={() => void viewOpen($, view.id, key)}><Text weight="semibold" bold>{title}</Text></Button>
+            : <Text key={`vrow:${key || rows.length}`} weight="semibold" bold wrap="truncate-end">{title}</Text>
+          rows.push(
+            <Box key={`vline:${key || rows.length}`} flexDirection="row" gap={1}>
+              {dot === undefined ? null : <Text color={dot ? C.add : C.border}>{dot ? '●' : '○'}</Text>}
+              <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+                {name}
+                {sub ? <Text dimColor size="footnote" wrap="truncate-end">{sub}</Text> : null}
+              </Box>
+            </Box>,
+          )
+        }
+      }
+      return [heading(view.title, view.description ? clip(view.description, 80) : undefined), search, filters, status, ...rows]
+    }
+
+    function viewDetail(view: ViewSpec, st: ViewState): RenderChildren[] {
+      const d = view.detail as NonNullable<ViewSpec['detail']>
+      const ctx: Record<string, unknown> = { key: st.key, query: st.query, filter: st.filter }
+      for (const [name, part] of Object.entries(st.detail)) if (part.state === 'ok') ctx[name] = part.value
+      const title = fillView(d.title, ctx).trim() || st.key
+      const sub = d.subtitle ? fillView(d.subtitle, ctx).trim() : ''
+      const refresh = <Button key="vrefresh" plain onPress={() => void viewOpen($, view.id, st.key)}>Refresh</Button>
+      const head = (
+        <Box key="vhead" flexDirection="row" alignItems="center" gap={1}>
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text size={isDesktop ? 'heading' : undefined} weight="bold" bold wrap="wrap">{title}</Text>
+            {sub ? <Text dimColor size="footnote" wrap="wrap">{sub}</Text> : null}
+          </Box>
+          {refresh}
+        </Box>
+      )
+      const sections = d.sections.map((sec, si) => {
+        const part = sec.from ? st.detail[sec.from] : undefined
+        const parts: RenderChildren[] = [<Text key={`sh:${si}`} size="footnote" weight="bold" dimColor>{sec.title.toUpperCase()}</Text>]
+        if (part?.state === 'loading') parts.push(<Text key={`sl:${si}`} dimColor>Loading…</Text>)
+        else if (part?.state === 'error') parts.push(<Text key={`se:${si}`} color={C.del} wrap="wrap">{part.message}</Text>)
+        else {
+          if (sec.stats.length)
+            parts.push(
+              <Box key={`ss:${si}`} flexDirection="row" gap={isDesktop ? 'lg' : 2} flexWrap="wrap">
+                {sec.stats.map((stat, i) => (
+                  <Box key={`st:${si}:${i}`} flexDirection="column" minWidth={isDesktop ? 96 : 12}>
+                    <Text dimColor size="caption">{stat.label}</Text>
+                    <Text weight="semibold" bold>{fillView(stat.value, ctx).trim() || '—'}</Text>
+                  </Box>
+                ))}
+              </Box>,
+            )
+          sec.text.forEach((t, i) => {
+            const filled = fillView(t, ctx).trim()
+            if (filled) parts.push(<Text key={`stx:${si}:${i}`} wrap="wrap" dimColor={i > 0}>{filled}</Text>)
+          })
+          if (sec.rows) {
+            const { items, total } = pickRows(sec.rows, ctx)
+            if (!items.length) parts.push(<Text key={`sre:${si}`} dimColor>{sec.rows.empty}</Text>)
+            items.forEach((row, i) => {
+              const rctx = { ...ctx, row }
+              const dot = sec.rows?.dot ? Boolean(getPath(rctx, sec.rows.dot)) : undefined
+              const sub2 = sec.rows?.subtitle ? fillView(sec.rows.subtitle, rctx).trim() : ''
+              parts.push(
+                <Box key={`sr:${si}:${i}`} flexDirection="row" gap={1}>
+                  {dot === undefined ? null : <Text color={dot ? C.add : C.border}>{dot ? '●' : '○'}</Text>}
+                  <Box flexDirection="column" flexShrink={1} minWidth={0}>
+                    <Text wrap="truncate-end">{fillView(sec.rows?.text ?? '', rctx)}</Text>
+                    {sub2 ? <Text dimColor size="footnote" wrap="truncate-end">{sub2}</Text> : null}
+                  </Box>
+                </Box>,
+              )
+            })
+            if (total > items.length) parts.push(<Text key={`srm:${si}`} dimColor size="footnote">{`${total - items.length} more`}</Text>)
+          }
+        }
+        return card(`vsec:${si}`, parts)
+      })
+      return [head, ...sections]
     }
 
     // ── 1. Workflows ──

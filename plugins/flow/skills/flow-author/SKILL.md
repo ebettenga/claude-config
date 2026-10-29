@@ -11,6 +11,7 @@ A workflow is designed once by you and then runs the same way every time, with A
 
 - The flows folder is the plugin's `workflowsDir` option, `~/Documents/flows` by default; a project can also have its own in `.flows/`.
 - One folder per workflow, named after its id: `flow.yaml`, plus `scripts/` for helper scripts and a short `README.md`.
+- A **view** (`view.yaml`) is a search, list and detail page over MCP calls, drawn on the hub's Views tab. Make one when the person wants to look things up rather than run a report; the README's Views section is its format.
 - The format reference is the flows folder's `README.md`. Read it before writing or changing a workflow, and copy the closest example.
 - `flows.yaml` can list `sources:`: a team's git repo of workflows, cloned under `~/.flow/sources` or at its `path`. A workflow for a team goes in that team's source, by MR, not in the personal flows folder; `pull_sources` fetches the latest.
 - `flows.yaml` at the flows folder's root groups and orders the workflows on the hub's Workflows page (`groups: [{title, workflows: [ids]}]`; unlisted ones go under Other). When you add a workflow, offer to put it in a group there.

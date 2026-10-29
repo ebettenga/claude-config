@@ -6,8 +6,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessSpawnResult, Register, Timer, TurnCompleteInput } from 'claude-code'
 
-import type { Found, ItemRun, Layout, LayoutGroup, Run, RunStatus, Source, SourceState, StepRun, StepSpec, StepStatus, Tier, Workflow } from '../types'
+import type { Found, FoundView, ItemRun, Layout, LayoutGroup, Run, RunStatus, Source, SourceState, StepRun, StepSpec, StepStatus, Tier, ViewCall, ViewPart, ViewSpec, ViewState, Workflow } from '../types'
 import { LAYOUT_FILE, layoutYaml, parseLayout, parseSources, rawSources } from './layout'
+import { VIEW_FILE, fillArgs, fillView, getPath, listArgs, parseResult, parseView, pickRows } from './views'
 import { rememberValues } from './file-finder'
 import {
   WORK_KINDS,
@@ -27,12 +28,14 @@ import {
   untilTime,
 } from './spec'
 import type { ConditionScope, TemplateContext } from './spec'
-import { hubRunStarted, hubSessionStart, hubTick } from './hub-state'
+import { hubRunStarted, hubSessionStart, hubTick, showView } from './hub-state'
 
 export const workflowsAtom = atom({ plugin: 'flow', key: 'workflows' } as const, [], { shape: 'workflows-1' })
 /** The flows folder's flows.yaml: how the Workflows page groups and orders them. */
 export const layoutAtom = atom({ plugin: 'flow', key: 'layout' } as const, { groups: [], errors: [] } as Layout, { shape: 'layout-1' })
 export const runsAtom = atom({ plugin: 'flow', key: 'runs' } as const, [], { shape: 'runs-1' })
+export const viewsAtom = atom({ plugin: 'flow', key: 'views' } as const, [] as FoundView[], { shape: 'views-1' })
+export const viewStatesAtom = atom({ plugin: 'flow', key: 'viewStates' } as const, {} as Record<string, ViewState>, { shape: 'view-states-1' })
 
 const MAX_RUNS = 30
 /** Run and agent steps (or for_each items) going at once in one run. */
@@ -172,12 +175,26 @@ export async function refreshWorkflows($: $): Promise<Found[]> {
   for (const src of sources) if (src.path !== base && src.path !== local) folders.push({ path: src.path, source: src.name })
   if (local !== base) folders.push({ path: local })
   const found: Found[] = []
+  const views: FoundView[] = []
   for (const { path: folder, source } of folders) {
     if (!folder || !(await $.fs.exists(folder).catch(() => false))) continue
     const entries = await $.fs.list(folder).catch(() => [])
     for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
       if (entry.name.startsWith('.') || !(entry.kind === 'dir' || entry.isLink)) continue
       const dir = `${folder}/${entry.name}`
+      const viewFile = `${dir}/${VIEW_FILE}`
+      if (await $.fs.exists(viewFile).catch(() => false)) {
+        let v: FoundView
+        try {
+          v = parseView(await $.fs.read(viewFile), dir, viewFile)
+        } catch (err) {
+          v = { id: entry.name, dir, file: viewFile, errors: [`cannot read ${viewFile}: ${errText(err)}`] }
+        }
+        if (source) v.source = source
+        const first = views.find(x => x.id === v.id)
+        if (first) v.errors.push(`id: "${v.id}" is already used by ${first.file}`)
+        views.push(v)
+      }
       const file = `${dir}/flow.yaml`
       if (!(await $.fs.exists(file).catch(() => false))) continue
       let f: Found
@@ -193,6 +210,7 @@ export async function refreshWorkflows($: $): Promise<Found[]> {
     }
   }
   await update($, workflowsAtom, () => found)
+  await update($, viewsAtom, () => views)
 
   // Each source's own flows.yaml groups, titled "<source> · <group>", then the rest of its workflows under its title.
   const states: SourceState[] = []
@@ -214,6 +232,119 @@ export async function refreshWorkflows($: $): Promise<Found[]> {
   const errors = [...parsed.errors, ...sourceErrors, ...states.filter(s => s.error).map(s => `sources: ${s.name}: ${s.error}`)]
   await update($, layoutAtom, () => ({ ...parsed, errors, file: layoutFile, sources: states }))
   return found
+}
+
+// ---------------------------------------------------------------------------
+// Views: the list and detail calls behind the Views tab
+
+/** A result kept in state at most this big; a bigger one is an error that says so. */
+const VIEW_RESULT_MAX = 400_000
+
+async function viewCall($: $, c: ViewCall, ctx: Record<string, unknown>): Promise<unknown> {
+  const args = fillArgs(c.args, ctx) as Record<string, unknown>
+  const r = await $.mcp.call(c.server, c.tool, args)
+  const out = r.content.map(b => ('text' in b && typeof b.text === 'string' ? b.text : '')).join('')
+  if (r.isError) throw new Error(out.trim().split('\n')[0] || `${c.server} ${c.tool} failed`)
+  if (out.length > VIEW_RESULT_MAX) throw new Error(`${c.tool} answered ${Math.round(out.length / 1000)} kB, too much to show: trim it in the tool (no full: true)`)
+  return parseResult(out)
+}
+
+const viewError = (err: unknown, c: ViewCall) => {
+  const msg = errText(err)
+  return /unknown tool|tool .*not found|no such tool/i.test(msg) ? `${c.server} has no tool ${c.tool} yet (${msg})` : msg
+}
+
+async function viewOf($: $, id: string): Promise<ViewSpec | undefined> {
+  let all = await read($, viewsAtom)
+  if (!all.some(v => v.id === id)) {
+    await refreshWorkflows($)
+    all = await read($, viewsAtom)
+  }
+  return all.find(v => v.id === id && v.view)?.view
+}
+
+async function setViewState($: $, id: string, change: (s: ViewState) => ViewState): Promise<ViewState> {
+  let next: ViewState | undefined
+  await update($, viewStatesAtom, all => {
+    const cur = all[id] ?? { query: '', filter: '', list: { state: 'loading' }, key: '', detail: {} }
+    next = change(cur)
+    return { ...all, [id]: next }
+  })
+  return next as ViewState
+}
+
+/** Runs a view's list call for a search and a filter (the first filter by default). */
+export async function viewSearch($: $, id: string, query: string, filter?: string): Promise<ViewState | undefined> {
+  const view = await viewOf($, id)
+  if (!view) return undefined
+  const prev = (await read($, viewStatesAtom))[id]
+  const f = filter ?? (prev?.filter || view.filters[0]?.id || '')
+  await setViewState($, id, s => ({ ...s, query, filter: f, list: { state: 'loading' }, key: '' }))
+  let list: ViewPart
+  try {
+    const value = await viewCall($, { ...view.list.call, args: listArgs(view, query, f) }, {})
+    const { items, total } = pickRows(view.list.rows, value)
+    const count = view.list.count ? Number(getPath(value, view.list.count)) : NaN
+    list = { state: 'ok', value: { items, total: Number.isFinite(count) ? count : total } }
+  } catch (err) {
+    list = { state: 'error', message: viewError(err, view.list.call) }
+  }
+  return setViewState($, id, s => (s.query === query && s.filter === f ? { ...s, list } : s))
+}
+
+/** Opens one item of a view: its detail calls run at once, each filling in as it answers. */
+export async function viewOpen($: $, id: string, key: string): Promise<ViewState | undefined> {
+  const view = await viewOf($, id)
+  if (!view?.detail) return undefined
+  const calls = Object.entries(view.detail.calls)
+  await setViewState($, id, s => ({ ...s, key, detail: Object.fromEntries(calls.map(([name]) => [name, { state: 'loading' } as ViewPart])) }))
+  await Promise.all(
+    calls.map(async ([name, c]) => {
+      let part: ViewPart
+      try {
+        // A key of digits is a number to the tool, as the list gave it (an id).
+        part = { state: 'ok', value: await viewCall($, c, { key: /^\d{1,15}$/.test(key) ? Number(key) : key }) }
+      } catch (err) {
+        part = { state: 'error', message: viewError(err, c) }
+      }
+      await setViewState($, id, s => (s.key === key ? { ...s, detail: { ...s.detail, [name]: part } } : s))
+    }),
+  )
+  return (await read($, viewStatesAtom))[id]
+}
+
+/** The view's open item as text: its title and each section's stats and lines, as the pane shows them. */
+function viewDetailText(view: ViewSpec, state: ViewState): string {
+  const d = view.detail
+  if (!d) return ''
+  const ctx: Record<string, unknown> = { key: state.key, query: state.query, filter: state.filter }
+  const errors: string[] = []
+  for (const [name, part] of Object.entries(state.detail)) {
+    if (part.state === 'ok') ctx[name] = part.value
+    else if (part.state === 'error') errors.push(`${name}: ${part.message}`)
+  }
+  const lines = [fillView(d.title, ctx), ...(d.subtitle ? [fillView(d.subtitle, ctx)] : [])]
+  for (const sec of d.sections) {
+    const part = sec.from ? state.detail[sec.from] : undefined
+    lines.push('', `## ${sec.title}`)
+    if (part?.state === 'error') {
+      lines.push(`(${part.message})`)
+      continue
+    }
+    for (const st of sec.stats) lines.push(`- ${st.label}: ${fillView(st.value, ctx) || '—'}`)
+    for (const t of sec.text) {
+      const filled = fillView(t, ctx).trim()
+      if (filled) lines.push(filled)
+    }
+    if (sec.rows) {
+      const { items, total } = pickRows(sec.rows, ctx)
+      if (!items.length) lines.push(sec.rows.empty)
+      for (const row of items) lines.push(`- ${fillView(sec.rows.text, { ...ctx, row })}`)
+      if (total > items.length) lines.push(`(${total - items.length} more)`)
+    }
+  }
+  if (errors.length) lines.push('', ...errors.map(e => `error: ${e}`))
+  return lines.join('\n')
 }
 
 /** Writes the groups to flows.yaml in the flows folder, then reads everything again. */
@@ -1917,6 +2048,30 @@ async function registerTools($: $): Promise<void> {
     inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Path to a flow.yaml, or to the folder holding it.' } }, required: ['path'] },
   })
   await $.tool.register({
+    name: 'list_views',
+    description:
+      `List the flow views the user can open on the /flow-chart Views tab. A view (view.yaml, beside workflows in ${workflowsDir} and its sources) is a search, a list and a detail page over MCP tool calls, such as a team's listener or customer lookup. ` +
+      'Returns JSON: id, source, title, description, whether it has a search, its filters, its detail sections, and errors. Use it before open_view.',
+    inputSchema: { type: 'object', properties: {} },
+  })
+  await $.tool.register({
+    name: 'open_view',
+    description:
+      'Open a flow view on the /flow-chart Views tab for the user. With query (and optionally filter), it runs the view\'s search and returns the rows it found with their keys. ' +
+      'With key, it opens that item\'s detail page and returns what the page shows as text (each section\'s numbers and lines), so you can answer questions about it too. ' +
+      'Use it when the user asks to look someone or something up in a view, e.g. "show me listener 4004" or "find listeners named Sam".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The view id (from list_views).' },
+        query: { type: 'string', description: 'Search text for the view\'s list.' },
+        filter: { type: 'string', description: 'A filter id from list_views; default the view\'s first.' },
+        key: { type: 'string', description: 'An item\'s key, to open its detail page.' },
+      },
+      required: ['id'],
+    },
+  })
+  await $.tool.register({
     name: 'pull_sources',
     description:
       `Fetch the latest flow workflows from every source listed under sources: in ${workflowsDir}/flows.yaml (a team's shared git repo of workflows): clones the ones not on this Mac yet and fast-forwards the rest, then reloads the workflow list. ` +
@@ -2041,6 +2196,49 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
   })
 
   on('tool.call', { tool: 'mcp__flow__pull_sources' }, async $ => ({ result: (await pullSources($)).join('\n') }))
+
+  on('tool.call', { tool: 'mcp__flow__list_views' }, async $ => {
+    await refreshWorkflows($)
+    const views = await read($, viewsAtom)
+    return {
+      result: JSON.stringify(
+        views.map(v => ({
+          id: v.id,
+          ...(v.source ? { source: v.source } : {}),
+          title: v.view?.title ?? v.id,
+          description: v.view?.description ?? '',
+          hasSearch: Boolean(v.view?.search),
+          filters: (v.view?.filters ?? []).map(f => ({ id: f.id, label: f.label })),
+          sections: (v.view?.detail?.sections ?? []).map(s => s.title),
+          errors: v.errors,
+        })),
+        null,
+        2,
+      ),
+    }
+  })
+
+  on('tool.call', { tool: 'mcp__flow__open_view' }, async ($, e) => {
+    const input = e as unknown as { id?: unknown; query?: unknown; filter?: unknown; key?: unknown }
+    const id = str(input.id)
+    const view = await viewOf($, id)
+    if (!view) return { result: `error: no view "${id}" (list_views lists them)` }
+    await showView($, id)
+    const key = str(input.key)
+    if (key) {
+      if (!view.detail) return { result: `error: view "${id}" has no detail page` }
+      const state = await viewOpen($, id, key)
+      return { result: state ? viewDetailText(view, state) : 'error: the view did not open' }
+    }
+    const filter = str(input.filter) || undefined
+    if (filter && !view.filters.some(f => f.id === filter)) return { result: `error: view "${id}" has no filter "${filter}" (${view.filters.map(f => f.id).join(', ') || 'none'})` }
+    const state = await viewSearch($, id, str(input.query), filter)
+    const list = state?.list
+    if (!list || list.state !== 'ok') return { result: `error: ${list?.state === 'error' ? list.message : 'the search did not run'}` }
+    const { items, total } = list.value as { items: unknown[]; total: number }
+    const rows = items.map(item => `- ${getPath(item, view.list.key)}: ${fillView(view.list.rows.text, { item })}${view.list.rows.subtitle ? ` (${fillView(view.list.rows.subtitle, { item })})` : ''}`)
+    return { result: [`${total} found${total > items.length ? `, showing ${items.length}` : ''}. Opened in /flow-chart. Keys first; open_view with key opens one.`, ...rows].join('\n') }
+  })
 
   on('tool.call', { tool: 'mcp__flow__validate_workflow' }, async ($, e) => ({ result: await validateText($, str((e as unknown as { path?: unknown }).path)) }))
 

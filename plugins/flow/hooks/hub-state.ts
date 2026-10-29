@@ -18,6 +18,7 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 const hubTab = atom({ plugin: 'flow', key: 'hubTab' } as const, 'workflows' as HubTab, { shape: 'hub-tab-1' })
 const hubWorkflow = atom({ plugin: 'flow', key: 'hubWorkflow' } as const, '', { shape: 'hub-workflow-1' })
 const hubRun = atom({ plugin: 'flow', key: 'hubRun' } as const, '', { shape: 'hub-run-1' })
+const hubView = atom({ plugin: 'flow', key: 'hubView' } as const, '', { shape: 'hub-view-1' })
 const hubPicker = atom({ plugin: 'flow', key: 'hubPicker' } as const, null as HubPicker | null, { shape: 'hub-picker-1' })
 const hubLogStep = atom({ plugin: 'flow', key: 'hubLogStep' } as const, '', { shape: 'hub-log-1' })
 const hubFrame = atom({ plugin: 'flow', key: 'hubFrame' } as const, 0, { shape: 'hub-frame-1' })
@@ -42,6 +43,13 @@ export async function checkEnv($: $, found: Found[]): Promise<void> {
   const out: HubEnv = {}
   for (const name of names) out[name] = await isEnvSet($, name)
   await update($, hubEnv, () => out)
+}
+
+/** The hub on the Views tab with one view open: opened, or brought forward. */
+export async function showView($: $, id: string): Promise<void> {
+  await update($, hubView, () => id)
+  await update($, hubTab, () => 'views')
+  await openHub($)
 }
 
 /** The hub on its Agents tab: opened, or brought forward. */
