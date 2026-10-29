@@ -1491,12 +1491,6 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       )
     }
 
-    /** A run card's press: open the run, and put its id at the cursor in the chat box (what was typed stays). */
-    async function openRunCard(r: Run) {
-      await $.prompt.fill({ text: `${r.id} `, mode: 'insert' }).catch(() => undefined)
-      await showRun($, r.id)
-    }
-
     function runRow(r: Run) {
       const color = RUN_COLOR[r.status]
       const p = progressOf(r)
@@ -1506,7 +1500,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         isLit: r.status === 'running' || r.status === 'waiting',
         right: <Text dimColor size="footnote" tabular>{duration((r.endedAt ?? now) - r.startedAt)}</Text>,
         title: (
-          <Button key={`open:${r.id}`} plain label={`Open run ${r.id} and put its id in the chat`} onPress={() => void openRunCard(r)}>
+          <Button key={`open:${r.id}`} plain onPress={() => void showRun($, r.id)}>
             <Text weight="semibold" wrap="truncate-end">{r.title}</Text>
           </Button>
         ),
@@ -1514,7 +1508,10 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         body: (
           <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
             <Box flexShrink={1} minWidth={0} overflow="hidden">
-              <Text size="footnote" color={r.status === 'failed' || r.status === 'waiting' ? color : undefined} dimColor={r.status !== 'failed' && r.status !== 'waiting'} wrap="truncate-end">{runOutcome(r)}</Text>
+              {/* The run id at the cursor in the chat box; what was typed stays. */}
+              <Button key={`runid:${r.id}`} plain onPress={() => void $.prompt.fill({ text: `${r.id} `, mode: 'insert' }).catch(() => undefined)}>
+                <Text size="footnote" color={r.status === 'failed' || r.status === 'waiting' ? color : undefined} dimColor={r.status !== 'failed' && r.status !== 'waiting'} wrap="truncate-end">{`${runOutcome(r)} · ${r.id}`}</Text>
+              </Button>
             </Box>
             <Text size="footnote">
               {r.steps.map(s => <Text key={`m:${r.id}:${s.id}`} color={s.status === 'running' ? color : MARK[s.status].color}>{MARK[s.status].glyph}</Text>)}

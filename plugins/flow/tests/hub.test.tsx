@@ -863,10 +863,11 @@ for (const surface of SURFACES) {
     expect(await ui.find({ type: 'Button', key: 'open:20261028-110000-bbbb' })).toBeTruthy()
     expect(await ui.find({ type: 'Button', key: 'open:20261027-090000-cccc' })).toBeFalsy()
     expect(await ui.find({ type: 'Text', text: /1 failed/ })).toBeTruthy()
-    // A card's press puts its run id in the chat and opens the run.
-    await ui.press({ key: 'open:20261028-110000-bbbb' })
+    // The small line at a card's bottom puts its run id in the chat; the title still opens the run.
+    expect(await ui.find({ type: 'Text', text: /· 20261028-110000-bbbb$/ })).toBeTruthy()
+    await ui.press({ key: 'runid:20261028-110000-bbbb' })
     expect(w.fills.at(-1)).toBe('20261028-110000-bbbb ')
-    await ui.press({ key: 'tab:runs' })
+    expect(await ui.find({ type: 'Text', text: /^CSV summary$/ })).toBeTruthy()
     // Fold one open and the other shut.
     await ui.press({ key: 'fold:runs:reports' })
     expect(await ui.find({ type: 'Button', key: 'open:20261027-090000-cccc' })).toBeTruthy()
