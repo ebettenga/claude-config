@@ -41,6 +41,7 @@ export const KIND: Record<StepKind, string> = {
   run: '#6ea8e8',
   python: '#4fb3a5',
   mcp: '#c792ea',
+  model: '#f0a6ca',
   http: '#82aaff',
   agent: '#b794f6',
   claude: '#f6a05a',
@@ -202,6 +203,9 @@ export function stepSub(spec: StepSpec, itemCount?: number): string {
       break
     case 'mcp':
       parts.push(spec.mcp ? `${spec.mcp.server} · ${spec.mcp.tool}` : firstLine(spec.body))
+      break
+    case 'model':
+      parts.push(spec.ask ? [spec.ask.use || 'session model', spec.ask.files.length ? `${spec.ask.files.length} file${spec.ask.files.length === 1 ? '' : 's'}` : '', spec.ask.write ? `→ ${spec.ask.write.split('/').pop()}` : ''].filter(Boolean).join(' · ') : firstLine(spec.body))
       break
     case 'http':
       parts.push(spec.http ? `${spec.http.method} ${spec.http.url}` : firstLine(spec.body))

@@ -86,6 +86,11 @@
       "options": {
         "palette": "fg=#e4e4e7 bg=#0f1117 accent=#7c8cff muted=#6b7280 urgent=#f87171 selection=#1e2235 hover=#171a26 added=#4ade80 modified=#fbbf24 renamed=#c084fc add=#4ade80 del=#f87171"
       }
+    },
+    "flow@ethan-claude": {
+      "options": {
+        "allowWorkers": "off"
+      }
     }
   },
   "inputNeededNotifEnabled": true,

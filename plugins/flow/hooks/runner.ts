@@ -513,6 +513,8 @@ function launch($: $, ctx: Live, spec: StepSpec, unit: Unit): Promise<void> {
           ? runMcp($, ctx, spec, unit)
           : spec.kind === 'http'
             ? runHttp($, ctx, spec, unit)
+            : spec.kind === 'model'
+              ? runModel($, ctx, spec, unit)
             : spec.kind === 'agent'
         ? runAgent($, ctx, spec, unit)
         : spec.kind === 'claude'
@@ -871,6 +873,56 @@ async function runMcp($: $, ctx: Live, spec: StepSpec, unit: Unit): Promise<void
     const output = clip(text.trim(), OUTPUT_MAX)
     if (result.isError) return { status: 'failed', patch: { output, error: oneLine(text, 300) || `${m.tool} reported an error` } }
     return { status: 'done', patch: { output } }
+  })
+}
+
+// A `model` step: one prompt to Claude through $.model.complete, with the named
+// files' text attached. No agent starts and no tool runs, so no permission is
+// asked; the answer is the output, and written to `write` when given.
+const MODEL_FILE_MAX = 200_000
+const MODEL_FILES_MAX = 400_000
+
+async function runModel($: $, ctx: Live, spec: StepSpec, unit: Unit): Promise<void> {
+  const { rec } = unit
+  const m = spec.ask
+  if (!m) return endUnit($, ctx, spec, unit, 'failed', { error: 'the model step has no prompt' })
+  const tctx = templateContext(ctx, unitItem(spec, unit))
+  const prompt = fill(m.prompt, tctx)
+  const write = m.write ? fill(m.write, tctx).trim() : ''
+  const attached: string[] = []
+  let total = 0
+  for (const raw of m.files) {
+    const path = fill(raw, tctx).trim()
+    if (!path) continue
+    if (!(await $.fs.exists(path).catch(() => false))) return endUnit($, ctx, spec, unit, 'failed', { error: `model.files: no file at ${path}` })
+    const text = await $.fs.read(path).catch(() => undefined)
+    if (typeof text !== 'string') return endUnit($, ctx, spec, unit, 'failed', { error: `model.files: can't read ${path}` })
+    const piece = clip(text, Math.min(MODEL_FILE_MAX, Math.max(0, MODEL_FILES_MAX - total)))
+    total += piece.length
+    attached.push(`<file path="${path}">\n${piece}\n</file>`)
+  }
+  const model = m.use || (await $.session.model().catch(() => '')) || 'sonnet'
+  const full = [prompt, ...attached].join('\n\n')
+  appendLog($, ctx, unit.key, rec, `model ${model}${m.files.length ? `, ${m.files.length} file(s) attached` : ''}\n--- prompt ---\n${clip(prompt, 4000)}\n`)
+  return callUnit($, ctx, spec, unit, async () => {
+    const r = await $.model.complete({
+      model,
+      prompt: full,
+      maxTokens: m.maxTokens,
+      ...(m.system ? { system: fill(m.system, tctx) } : {}),
+      ...(m.effort ? { effort: m.effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max' } : {}),
+    })
+    if (!r.isAnswered) {
+      const why = r.reason === 'api-error' ? `the API answered with an error${r.status ? ` (${r.status})` : ''}` : r.reason === 'empty-reply' ? 'the model gave no text' : `the call ended: ${r.reason}`
+      return { status: 'failed', patch: { error: why } }
+    }
+    const answer = r.text.trim()
+    if (rec.status === 'running') appendLog($, ctx, unit.key, rec, `--- answer ---\n${answer}\n`)
+    if (write) {
+      const wrote = await $.fs.write(write, `${answer}\n`).then(() => true, () => false)
+      if (!wrote) return { status: 'failed', patch: { output: clip(answer, OUTPUT_MAX), error: `model.write: can't write ${write}` } }
+    }
+    return { status: 'done', patch: { output: clip(answer, OUTPUT_MAX) } }
   })
 }
 

@@ -2,18 +2,20 @@
 // so the rules can be tested on their own; register.tsx reads the files.
 
 import { load } from './vendor/js-yaml.mjs'
-import type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow } from '../types'
+import type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow, ModelSpec } from '../types'
 
 export type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow }
 
 export const INPUT_TYPES = ['text', 'textarea', 'number', 'boolean', 'date', 'select', 'file', 'folder'] as const satisfies readonly InputType[]
 export const TIERS = ['light', 'medium', 'careful', 'heavy', 'fable'] as const satisfies readonly Tier[]
-export const STEP_KINDS = ['run', 'agent', 'approve', 'claude', 'wait', 'uses', 'python', 'mcp', 'http'] as const satisfies readonly StepKind[]
+export const STEP_KINDS = ['run', 'agent', 'approve', 'claude', 'wait', 'uses', 'python', 'mcp', 'http', 'model'] as const satisfies readonly StepKind[]
 /** Steps that do work, take a slot, and can be retried and repeated (for_each). */
-export const WORK_KINDS = ['run', 'agent', 'python', 'mcp', 'http'] as const satisfies readonly StepKind[]
+export const WORK_KINDS = ['run', 'agent', 'python', 'mcp', 'http', 'model'] as const satisfies readonly StepKind[]
 export const PYTHON_FIELDS = ['file', 'code', 'args', 'interpreter', 'requirements'] as const
 export const MCP_FIELDS = ['server', 'tool', 'args'] as const
 export const HTTP_FIELDS = ['method', 'url', 'headers', 'body', 'expect'] as const
+export const MODEL_FIELDS = ['prompt', 'files', 'write', 'use', 'max_tokens', 'effort', 'system'] as const
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const WAIT_KINDS = ['file', 'url', 'until'] as const
 export const FILTERS = ['sh', 'json'] as const
 export const OUTPUT_FIELDS = ['file', 'title', 'chart'] as const
@@ -41,7 +43,7 @@ const listText = (xs: readonly string[]) => (xs.length < 2 ? xs.join('') : `${xs
 const ENV_TEMPLATE_PLACES = 'python args, mcp args and http url, headers and body'
 
 /** A step is AI when Claude does it: an agent or claude step. Everything else runs the same way every time. */
-export const isAIStep = (spec: Pick<StepSpec, 'kind'>) => spec.kind === 'agent' || spec.kind === 'claude'
+export const isAIStep = (spec: Pick<StepSpec, 'kind'>) => spec.kind === 'agent' || spec.kind === 'claude' || spec.kind === 'model'
 
 /** Every string in a value (deep), in order. */
 export function deepStrings(value: unknown): string[] {
@@ -224,6 +226,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
       let withValues: Record<string, string> | undefined
       let python: PythonSpec | undefined
       let mcp: McpSpec | undefined
+      let ask: ModelSpec | undefined
       let http: HttpSpec | undefined
       /** The templated parts of a python, mcp or http step, and whether each may use {{env.NAME}}. */
       const parts: { text: string; isEnvOk: boolean }[] = []
@@ -314,6 +317,20 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
         mcp = { server, tool, args: isObj(mm.args) ? mm.args : {} }
         for (const t of deepStrings(mcp.args)) parts.push({ text: t, isEnvOk: true })
         body = `${server} ${tool}`.trim()
+      } else if (kind === 'model') {
+        const m = raw.model
+        if (!isObj(m)) errors.push(`${at}.model: must be a mapping with prompt (and files, write, use)`)
+        const mm = isObj(m) ? m : {}
+        if (isObj(m)) unknownFields('model', m, MODEL_FIELDS)
+        const prompt = str(mm.prompt)
+        if (isObj(m) && !prompt.trim()) errors.push(`${at}.model.prompt: a model step needs a prompt`)
+        const maxTokens = mm.max_tokens === undefined ? 4000 : Number(mm.max_tokens)
+        if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > 64000) errors.push(`${at}.model.max_tokens: must be a whole number from 1 to 64000`)
+        const effort = str(mm.effort).trim()
+        if (effort && !EFFORTS.includes(effort)) errors.push(`${at}.model.effort: must be one of ${EFFORTS.join(', ')}`)
+        ask = { prompt, files: strList(mm.files), write: str(mm.write).trim(), use: str(mm.use).trim(), maxTokens, effort, system: str(mm.system) }
+        for (const t of [ask.prompt, ask.write, ask.system, ...ask.files]) if (t) parts.push({ text: t, isEnvOk: false })
+        body = prompt
       } else if (kind === 'http') {
         const h = raw.http
         if (!isObj(h)) errors.push(`${at}.http: must be a mapping with url`)
@@ -406,10 +423,11 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
       if (python) spec.python = python
       if (mcp) spec.mcp = mcp
       if (http) spec.http = http
+      if (ask) spec.ask = ask
 
       const isItemOk = spec.forEach !== undefined
       // A python, mcp or http step's templates are its parts (inline python code is not templated).
-      const isParted = kind === 'python' || kind === 'mcp' || kind === 'http'
+      const isParted = kind === 'python' || kind === 'mcp' || kind === 'http' || kind === 'model'
       for (const t of [...(isParted ? [] : [body]), spec.cwd, ...spec.outputs, ...Object.values(withValues ?? {})]) texts[i]?.push({ text: t, isItemOk })
       for (const p of parts) texts[i]?.push({ text: p.text, isItemOk, isEnvOk: p.isEnvOk })
       steps.push(spec)

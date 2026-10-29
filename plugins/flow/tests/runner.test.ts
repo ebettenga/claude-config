@@ -20,6 +20,8 @@ type Setup = {
   packages?: string[]
   mcp?: (e: McpCall) => McpResult | Promise<McpResult>
   http?: (e: HttpCall) => HttpResult | Promise<HttpResult>
+  /** Answers $.model.complete; default: an answer echoing the prompt's first line. */
+  model?: (e: { model: string; prompt: string; maxTokens?: number }) => unknown
 }
 
 /** Everything beneath the plugin: files in memory, children the test ends, agents and prompts recorded. */
@@ -64,6 +66,14 @@ function world(on: On, setup: Setup = {}) {
     mcpCalls.push({ server: e.server, tool: e.tool, args: e.args })
     return { value: (await setup.mcp?.(e)) ?? { content: [], isError: false } }
   })
+  const modelCalls: { model: string; prompt: string; maxTokens?: number }[] = []
+  const usage = { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  on('model.complete', async (_, e) => {
+    const call = { model: e.model, prompt: e.prompt, maxTokens: e.maxTokens }
+    modelCalls.push(call)
+    return { value: (setup.model?.(call) ?? { isAnswered: true, text: `answer to: ${e.prompt.split('\n')[0]}`, usage }) as never }
+  })
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
   const httpCalls: HttpCall[] = []
   on('http.fetch', async (_, e) => {
     httpCalls.push({ url: e.url, init: e.init })
@@ -100,7 +110,7 @@ function world(on: On, setup: Setup = {}) {
 
   const runFile = (wf: string, id: string) => JSON.parse(files.get(`${RUNS}/${wf}/${id}/run.json`) ?? 'null') as Run
   const stepsOf = (wf: string, id: string) => Object.fromEntries(runFile(wf, id).steps.map(s => [s.id, s.status]))
-  return { clock, files, procs, spawned, prompts, runFile, stepsOf, runs, mcpCalls, httpCalls }
+  return { clock, files, procs, spawned, prompts, runFile, stepsOf, runs, mcpCalls, httpCalls, modelCalls }
 }
 
 async function begin($: Engine) {
@@ -1203,4 +1213,63 @@ test('step_log: the full log and the output of a step or an item', async ($, on)
   )
   expect(await call($, 'step_log', { run: id, step: 'each', item: 5 })).toBe('error: step "each" has no item 5 (items 0 to 1)')
   expect(await call($, 'step_log', { run: id, step: 'ghost' })).toBe(`error: run ${id} has no step "ghost" (steps: one, each)`)
+})
+
+test('model: one prompt with files attached; the answer is the output and is written', async ($, on) => {
+  const w = world(on, {
+    files: {
+      [`${FLOWS}/ask/flow.yaml`]: `title: Ask
+steps:
+  - id: make
+    run: echo stats
+  - id: insights
+    model:
+      prompt: "Write insights for {{steps.make.output}}."
+      files: ["{{run.dir}}/stats.md"]
+      write: "{{run.dir}}/insights.md"
+      use: haiku
+      max_tokens: 800
+  - id: session
+    after: []
+    model: { prompt: Hello }
+`,
+    },
+  })
+  await begin($)
+  const id = await start($, 'ask')
+  await w.clock.settle()
+  const dir = `${RUNS}/ask/${id}`
+  w.files.set(`${dir}/stats.md`, '| a | 1 |')
+  w.procs[0]?.finish(0, 'stats\n')
+  await w.clock.settle()
+  const run = w.runFile('ask', id)
+  expect(run.steps[1]).toMatchObject({ status: 'done', output: 'answer to: Write insights for stats.' })
+  expect(run.steps[2]).toMatchObject({ status: 'done' })
+  const call = w.modelCalls.find(c => c.model === 'haiku')
+  expect(call?.maxTokens).toBe(800)
+  expect(call?.prompt).toContain(`<file path="${dir}/stats.md">\n| a | 1 |\n</file>`)
+  expect(w.modelCalls.find(c => c.prompt === 'Hello')?.model).toBe('claude-opus-5-5')
+  expect(w.files.get(`${dir}/insights.md`)).toBe('answer to: Write insights for stats.\n')
+})
+
+test('model: a missing file or an API error fails the step', async ($, on) => {
+  const w = world(on, {
+    model: e => (e.prompt.startsWith('boom') ? { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded' } : undefined),
+    files: {
+      [`${FLOWS}/askfail/flow.yaml`]: `title: Ask fail
+steps:
+  - id: nofile
+    model: { prompt: read it, files: ["{{run.dir}}/missing.md"] }
+  - id: api
+    after: []
+    model: { prompt: boom }
+`,
+    },
+  })
+  await begin($)
+  const id = await start($, 'askfail')
+  await w.clock.settle()
+  const run = w.runFile('askfail', id)
+  expect(run.steps[0]?.error).toContain('model.files: no file at')
+  expect(run.steps[1]).toMatchObject({ status: 'failed', error: 'the API answered with an error (529)' })
 })

@@ -51,7 +51,7 @@ export type Panel = {
 
 export type InputType = 'text' | 'textarea' | 'number' | 'boolean' | 'date' | 'select' | 'file' | 'folder'
 export type Tier = 'light' | 'medium' | 'careful' | 'heavy' | 'fable'
-export type StepKind = 'run' | 'agent' | 'approve' | 'claude' | 'wait' | 'uses' | 'python' | 'mcp' | 'http'
+export type StepKind = 'run' | 'agent' | 'approve' | 'claude' | 'wait' | 'uses' | 'python' | 'mcp' | 'http' | 'model'
 
 export type InputSpec = {
   id: string
@@ -107,6 +107,23 @@ export type StepSpec = {
   mcp?: McpSpec
   /** An http step: one request through the host. */
   http?: HttpSpec
+  /** A model step: one prompt to Claude with files attached; no agent, no tools. */
+  ask?: ModelSpec
+}
+
+export type ModelSpec = {
+  /** Templated. */
+  prompt: string
+  /** Templated paths whose text is attached after the prompt. */
+  files: string[]
+  /** Templated path the answer is written to, or empty. */
+  write: string
+  /** A model alias or id; empty: the session's model. */
+  use: string
+  maxTokens: number
+  effort: string
+  /** Templated system prompt, or empty. */
+  system: string
 }
 
 export type PythonSpec = {

@@ -111,7 +111,7 @@ steps:
     run: ls
     after: [nowhere]
 `)
-    expect(steps).toContain('steps[0]: needs exactly one of run, agent, approve, claude, wait, uses, python, mcp, http (has run, approve)')
+    expect(steps).toContain('steps[0]: needs exactly one of run, agent, approve, claude, wait, uses, python, mcp, http, model (has run, approve)')
     expect(steps).toContain('steps[1].id: "a" is used twice')
     expect(steps).toContain('steps[2].agent: "giant" must be one of light, medium, careful, heavy, fable')
     expect(steps).toContain('steps[2].prompt: an agent step needs a prompt')
@@ -388,7 +388,7 @@ steps:
 `)
     expect(errors).toEqual([
       'steps[1].if: use == to compare',
-      'steps[2].retry: only run, agent, python, mcp and http steps take retry:',
+      'steps[2].retry: only run, agent, python, mcp, http and model steps take retry:',
       'steps[3].retry: must be a whole number from 0 to 5',
       'steps[3].retry_delay: must be a number of seconds',
       'steps[4].outputs: "/etc/passwd" must be a path inside the run folder',
@@ -544,7 +544,7 @@ steps:
       'steps[5].http.url: "ftp://x" must be an http or https URL',
       'steps[5].http.headers.A: must be a single value',
       'steps[5].http.expect: must be HTTP status codes (100 to 599)',
-      'steps[9].for_each: only run, agent, python, mcp and http steps take for_each:',
+      'steps[9].for_each: only run, agent, python, mcp, http and model steps take for_each:',
       'steps[6]: {{env.TOKEN}} only works in python args, mcp args and http url, headers and body (a run step has $TOKEN)',
       'steps[7]: {{env.OTHER}} needs OTHER listed under env:',
       'steps[8]: {{steps.a.json.x.}} is not a JSON path (use steps.<id>.json, then .key and [n], as in steps.fetch.json.orders[0].total)',
@@ -634,4 +634,15 @@ outputs:
       'outputs[4].chart.sort: "random" must be value or label',
     ])
   })
+})
+
+test('loader: a model step is AI, and its fields are checked', () => {
+  const ok = parseWorkflow('steps:\n  - id: a\n    model: { prompt: hi, files: [x.md], write: out.md, use: haiku }\n', '/f/w', '/f/w/flow.yaml')
+  expect(ok.errors).toEqual([])
+  expect(ok.workflow?.steps[0]?.kind).toBe('model')
+  expect(isAIStep(ok.workflow!.steps[0]!)).toBe(true)
+  const bad = parseWorkflow('steps:\n  - id: a\n    model: { files: [x], effort: huge, max_tokens: 0, colour: red }\n', '/f/w', '/f/w/flow.yaml')
+  expect(bad.errors.join('\n')).toContain('model.prompt: a model step needs a prompt')
+  expect(bad.errors.join('\n')).toContain('model.effort: must be one of')
+  expect(bad.errors.join('\n')).toContain('model.max_tokens')
 })
