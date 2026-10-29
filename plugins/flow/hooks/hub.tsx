@@ -52,6 +52,7 @@ import {
 } from './hub-parts'
 import { checkEnv, openHub, showRun, showWorkflow } from './hub-state'
 import { SVG } from './icons'
+import { agentsView } from './progress'
 import { cancelRun, decideStep, refreshWorkflows, rerun, resumeRun, saveLayout, startRun } from './runner'
 import { OTHER, addGroup, arrange, moveGroup, moveWorkflow, removeGroup, renameGroup, setGroup } from './layout'
 import type { Section } from './layout'
@@ -72,6 +73,8 @@ const EMPTY_CATALOG: HubCatalog = { skills: [], agents: [], mcp: [], at: 0 }
 // atom only where a const of the same file makes it (same keys, same tags).
 const workflowsAtom = atom({ plugin: 'flow', key: 'workflows' } as const, [], { shape: 'workflows-1' })
 const runsAtom = atom({ plugin: 'flow', key: 'runs' } as const, [], { shape: 'runs-1' })
+// progress.tsx's subagent list, for the Agents tab's running count.
+const agentsAtom = atom({ plugin: 'flow', key: 'progressAgents' } as const, [])
 const hubTab = atom({ plugin: 'flow', key: 'hubTab' } as const, 'workflows' as HubTab, { shape: 'hub-tab-1' })
 const hubWorkflow = atom({ plugin: 'flow', key: 'hubWorkflow' } as const, '', { shape: 'hub-workflow-1' })
 const hubRun = atom({ plugin: 'flow', key: 'hubRun' } as const, '', { shape: 'hub-run-1' })
@@ -192,7 +195,8 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     const width = Math.max(30, e.props.bodyColumns ?? 60)
     // The body in pixels, as progress.tsx reckons it; a card's inside is ~40 px less.
     const px = Math.max(160, Math.min(900, width * 8 - 8))
-    const [found, runs, tab, wfId, runId, forms, picked, q, logKey, frame, catalog, env, attempts, openResults, layout, isArranging, folded] = await Promise.all([
+    const [agentList, found, runs, tab, wfId, runId, forms, picked, q, logKey, frame, catalog, env, attempts, openResults, layout, isArranging, folded] = await Promise.all([
+      read($, agentsAtom),
       read($, workflowsAtom),
       read($, runsAtom),
       read($, hubTab),
@@ -216,6 +220,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     const home = ((await $.env.get('HOME').catch(() => undefined)) ?? '').replace(/\/+$/, '')
     const loaded = found.filter((f): f is Found & { workflow: Workflow } => Boolean(f.workflow))
     const active = runs.filter(r => r.status === 'running' || r.status === 'waiting')
+    const agentsRunning = agentList.filter(a => a.status === 'running').length
     const gap = isDesktop ? 'md' : 1
 
     let body: RenderChildren[]
@@ -225,6 +230,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     else if (tab === 'workflows') body = [runningCard(), tabsRow(), ...workflowsList()]
     else if (tab === 'runs' && openRun) body = [tabsRow(), ...(await runBoard(openRun))]
     else if (tab === 'runs') body = [tabsRow(), ...runsList()]
+    else if (tab === 'agents') body = [tabsRow(), await agentsView($, e, true)]
     else {
       // Opened on this tab (a reload, a new session): nothing was read yet, so read it now.
       if (catalog.at === 0) void reloadCatalog($).catch(() => undefined)
@@ -236,7 +242,9 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         ? openWf ? 'workflow' : plural(loaded.length, 'workflow')
         : tab === 'runs'
           ? openRun ? 'run' : active.length ? `${active.length} running` : plural(runs.length, 'run')
-          : 'skills'
+          : tab === 'agents'
+            ? agentsRunning ? `${agentsRunning} running` : plural(agentList.length, 'agent')
+            : 'skills'
 
     return (
       <Box flexDirection="column" gap={gap} width={width}>
@@ -377,6 +385,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         <Box flexDirection="row" gap={1}>
           <Button key="tab:workflows" variant={tab === 'workflows' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'workflows')}>Workflows</Button>
           <Button key="tab:runs" variant={tab === 'runs' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'runs')}>{`Runs${active.length ? ` (${active.length})` : ''}`}</Button>
+          <Button key="tab:agents" variant={tab === 'agents' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'agents')}>{`Agents${agentsRunning ? ` (${agentsRunning})` : ''}`}</Button>
           <Button key="tab:skills" variant={tab === 'skills' ? 'primary' : 'secondary'} onPress={() => void goTab($, 'skills')}>Skills</Button>
         </Box>
       )

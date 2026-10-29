@@ -31,3 +31,14 @@ test('desktop: the row is still one Svg', async ($, on) => {
   await session($, on)
   expect(await band($, 'desktop')).toEqual({ svg: 1, title: 0, label: 0 })
 })
+
+test('with no flow, the bar stays up idle by default', async ($, on) => {
+  mock.env(on, { LANG: 'en_US.UTF-8' })
+  on('settings.read', async () => ({ value: {} }) as never)
+  on('session.start', async () => ({ cwd: '/repo' }) as never)
+  await $.session.start({ source: 'startup', cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
+  const ui = await $.ui.mount({ plugin: 'flow', surface: 'desktop', ...BAND })
+  const idle = await ui.findAll({ type: 'Text', text: /^No flow running$/ })
+  await ui.unmount()
+  expect(idle.length).toBe(1)
+})

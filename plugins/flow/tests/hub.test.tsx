@@ -106,7 +106,8 @@ steps:
 type Proc = { command: string; finish: (code: number) => void }
 
 /** Files in memory, children the test ends, prompt fills recorded. */
-function world(on: On, files: Record<string, string>, env: Record<string, string> = {}) {
+// `isTrackingPanes`: ui.panes answers with the panes opened and not closed since.
+function world(on: On, files: Record<string, string>, env: Record<string, string> = {}, isTrackingPanes = false) {
   const clock = mock.clock(on, { now: new Date(2026, 9, 28, 12, 0, 0).getTime() })
   const vars: Record<string, string> = { HOME, ...env }
   mock.env(on, vars)
@@ -166,12 +167,21 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
   on('tool.register', (_, e) => ({ value: { tool: `mcp__flow__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('settings.read', () => ({ value: {} }) as never)
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const panes: string[] = []
+  on('ui.open', (_, e) => {
+    if (!panes.includes(e.id)) panes.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', (_, e) => {
+    if (panes.includes(e.id)) panes.splice(panes.indexOf(e.id), 1)
+    return { value: undefined } as never
+  })
+  if (isTrackingPanes) on('ui.panes', () => ({ value: panes.map(id => ({ id })) }) as never)
   on('session.cwd', () => ({ value: '/repo' }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   const runIds = (wf: string) => [...fs.keys()].filter(k => k.startsWith(`${RUNS}/${wf}/`) && k.endsWith('/run.json')).map(k => k.split('/').slice(-2)[0] ?? '')
   const runFile = (wf: string, id: string) => JSON.parse(fs.get(`${RUNS}/${wf}/${id}/run.json`) ?? 'null') as Run
-  return { clock, fs, procs, fills, runIds, runFile }
+  return { clock, fs, procs, fills, panes, runIds, runFile }
 }
 
 async function begin($: Engine, surface: (typeof SURFACES)[number]) {
@@ -213,6 +223,8 @@ for (const surface of SURFACES) {
     // 3. runs, 4. skills
     await ui.press({ key: 'tab:runs' })
     expect(await ui.find({ type: 'Text', text: /No runs yet/ })).toBeTruthy()
+    await ui.press({ key: 'tab:agents' })
+    expect(await ui.find({ type: 'Text', text: /No subagents yet/ })).toBeTruthy()
     await ui.press({ key: 'tab:skills' })
     await w.clock.settle()
     expect(await ui.find({ type: 'Text', text: /EVERYTHING CLAUDE CAN USE/ })).toBeTruthy()
@@ -674,3 +686,19 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 }
+
+test('the Agents tab lists the flow plan, and the band button opens and closes it', async ($, on) => {
+  const w = world(on, { [`${FLOWS}/reports/flow.yaml`]: REPORTS }, {}, true)
+  await begin($, 'terminal')
+  await $.tool.call({ tool: 'mcp__flow__progress', title: 'Ship it', phase: 'delegate', tasks: [{ title: 'Write the parser', tier: 'careful' }] } as never)
+  w.panes.splice(0)
+
+  const band = await $.ui.mount({ plugin: 'flow', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 100 } as never })
+  await band.press({ key: 'flow-agents' })
+  expect(w.panes).toEqual(['flow-chart'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Write the parser/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Button', key: 'tab:agents' })).toBeTruthy()
+  await band.press({ key: 'flow-agents' })
+  expect(w.panes).toEqual([])
+})

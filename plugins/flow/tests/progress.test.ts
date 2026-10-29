@@ -33,7 +33,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect((await ui.find({ key: 'flow-agents' }))?.props.label).toBe('×2')
 
     await $.tool.call({ tool: PROGRESS, done: 1 } as never)
-    expect(opened).toEqual(['flow-agents'])
+    expect(opened).toEqual(['flow-chart'])
     expect(await $.tool.call({ tool: PROGRESS, finished: true } as never)).toMatchObject({ result: 'ok: Done' })
   })
 

@@ -21,8 +21,8 @@ The plugin ships:
 ## Commands
 
 - `/flow:flow <task>`: run the orchestrator on a task.
-- `/flow-agents`: show the agents panel.
-- `/flow-chart`: the workflows hub (see below).
+- `/flow-agents`: show or hide the Agents tab of the flow chart (the bar's `×N` button does the same).
+- `/flow-chart`: the hub: Workflows, Runs, Agents (every subagent of the session, running, finished and planned) and Skills.
 
 ## Workflows
 

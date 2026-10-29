@@ -2,7 +2,7 @@
 // session start, when a run starts, on the 250 ms tick). Nothing here imports
 // the runner, so the runner can import this.
 
-import { atom, update } from 'claude-code'
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { Found, HubEnv, HubPicker, HubTab, Run } from '../types'
@@ -42,6 +42,29 @@ export async function checkEnv($: $, found: Found[]): Promise<void> {
   const out: HubEnv = {}
   for (const name of names) out[name] = await isEnvSet($, name)
   await update($, hubEnv, () => out)
+}
+
+/** The hub on its Agents tab: opened, or brought forward. */
+export async function showAgents($: $): Promise<void> {
+  await update($, hubTab, () => 'agents')
+  await openHub($)
+}
+
+/** The bar's agents button and /flow-agents: closes the hub when it is up on Agents, else shows Agents. */
+export async function toggleAgents($: $): Promise<boolean> {
+  const isUp = await $.ui.panes().then(panes => panes.some(p => p.id === PANE)).catch(() => false)
+  if (isUp && (await read($, hubTab)) === 'agents') {
+    await $.ui.close({ id: PANE })
+    return false
+  }
+  await showAgents($)
+  return true
+}
+
+/** Workers started: the hub opens on Agents, but an open hub keeps the tab it is on. */
+export async function autoShowAgents($: $): Promise<void> {
+  const isUp = await $.ui.panes().then(panes => panes.some(p => p.id === PANE)).catch(() => false)
+  if (!isUp) await showAgents($)
 }
 
 export async function showRun($: $, runId: string): Promise<void> {

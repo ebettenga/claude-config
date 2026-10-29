@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
 import { LOGO_TEXT_PARTS, logoMark } from './brand'
+import { autoShowAgents, showAgents, toggleAgents } from './hub-state'
 
 const flow = atom({ plugin: 'flow', key: 'progressFlow' } as const, null)
 const agents = atom({ plugin: 'flow', key: 'progressAgents' } as const, [])
@@ -75,6 +76,7 @@ const STRINGS = {
     tasks: 'Tasks',
     review: 'Review',
     busy: 'running',
+    idle: 'No flow running',
     ctx: 'ctx',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
@@ -106,6 +108,7 @@ const STRINGS = {
     tasks: 'Задачи',
     review: 'Ревью',
     busy: 'в работе',
+    idle: 'Flow не запущен',
     ctx: 'ctx',
     tier: { light: 'light', medium: 'medium', careful: 'careful', heavy: 'heavy', fable: 'fable', other: 'other' },
     effort: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
@@ -137,6 +140,7 @@ const STRINGS = {
     tasks: 'משימות',
     review: 'בדיקה',
     busy: 'בעבודה',
+    idle: 'אין flow פעיל',
     ctx: 'הקשר',
     tier: { light: 'קל', medium: 'בינוני', careful: 'זהיר', heavy: 'כבד', fable: 'פייבל', other: 'אחר' },
     effort: { low: 'נמוך', medium: 'בינוני', high: 'גבוה', xhigh: 'גבוה מאוד', max: 'מקסימלי' },
@@ -786,17 +790,11 @@ const ctxBar = (pct: number, width: number): string => {
 
 const STATUS_GLYPH: Record<string, string> = { running: '●', done: '✓', failed: '✗', planned: '◷' }
 
-// Opens the agents pane, or closes it when it is up; true when it ends up open.
+// Shows the hub's Agents tab, or closes the hub when it is up on it; true when it ends up shown.
 async function togglePane($: EngineInterface): Promise<boolean> {
-  const isOpen = (await $.ui.panes()).some(p => p.id === PANE)
-  if (isOpen) {
-    await $.ui.close({ id: PANE })
-    return false
-  }
   const at = await $.clock.now()
   await update($, now, () => at)
-  await $.ui.open({ id: PANE, title: tr().pane })
-  return true
+  return toggleAgents($)
 }
 
 // The `autoOpen` option: `flow` (the default), `any`, or `off` (only /flow-agents opens it).
@@ -808,7 +806,195 @@ async function autoOpen($: EngineInterface, key: string): Promise<void> {
   const p = await read($, panel)
   if (p.autoOpenedFor === key) return
   await update($, panel, prev => ({ ...prev, autoOpenedFor: key }))
-  void $.ui.open({ id: PANE, title: tr().pane })
+  void autoShowAgents($)
+}
+
+// The agents view: every subagent of the session, plus the tasks the flow planned. It draws the
+// hub's Agents tab (`isEmbedded`: the hub draws the logo) and a legacy flow-agents pane.
+type PaneEvent = Parameters<Parameters<Parameters<Register>[0]>[2]>[1]
+
+export async function agentsView($: EngineInterface, e: PaneEvent, isEmbedded = false): Promise<RenderChildren> {
+  const s = tr()
+  const ui = $.ui.resolve(e)
+  const { Box, Text, Button } = ui
+  const list = await read($, agents)
+  const f = await read($, flow)
+  const p: Panel = await read($, panel)
+  const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
+
+  const running = list.filter(a => a.status === 'running').reverse()
+  const finished = list.filter(a => a.status !== 'running').reverse()
+  const planned = plannedOf(f, list)
+  const t = totals(list, at)
+  // The pane's title says "Agents"; inside, only the flow's own name.
+  const title = f && !f.isFinished ? f.title : ''
+
+  const toggleCompact = (
+    <Button
+      key="compact"
+      label={p.isCompact ? s.expand : s.collapse}
+      plain
+      onPress={() => update($, panel, prev => ({ ...prev, isCompact: !prev.isCompact }))}
+    />
+  )
+  const toggleDone = (
+    <Button
+      key="done"
+      label={`${p.isDoneCollapsed ? (isRtl() ? '◂' : '▸') : '▾'} ${s.finished} · ${finished.length}`}
+      plain
+      onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
+    />
+  )
+  const isEmpty = list.length === 0 && planned.length === 0
+  const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
+
+  if (e.surface === 'desktop' && 'Svg' in ui) {
+    const { Svg } = ui
+    const W = Math.max(240, Math.min(900, (e.props.bodyColumns || 40) * 8 - 8))
+    const section = (key: string, text: string) => (
+      <Text key={key} dimColor>
+        {text}
+      </Text>
+    )
+
+    // In Hebrew the column hugs the right edge: section heads and buttons right-aligned.
+    const align = isRtl() ? 'flex-end' : undefined
+    if (p.isCompact) {
+      return (
+        <Box flexDirection="column" gap={1} alignItems={align}>
+          <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
+          {toggleCompact}
+        </Box>
+      )
+    }
+    const shownDone = p.isDoneCollapsed ? 0 : finished.length
+    const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
+    const brandH = isEmbedded ? 0 : BRAND_H
+    const gridH = brandH + headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+    return (
+      <Box flexDirection="column">
+        {/* The grid sizes the pane; the content is placed over it, as an
+            absolute Box paints over the siblings before it. */}
+        {gridTiles(gridH).map((tileH, i) => (
+          <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
+        ))}
+        <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
+          {!isEmbedded && <Svg source={brandSvg(W)} alt="flow agents" width={W} height={BRAND_H} />}
+          <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
+          {toggleCompact}
+          {isEmpty && <Text dimColor>{s.empty}</Text>}
+          {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
+          {running.map(a => (
+            <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
+          ))}
+          {finished.length > 0 && toggleDone}
+          {!p.isDoneCollapsed &&
+            finished.map(a => (
+              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
+            ))}
+          {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
+          {planned.map(pl => (
+            <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={46} />
+          ))}
+        </Box>
+      </Box>
+    )
+  }
+
+  // Terminal: the same content in text rows.
+  const cols = Math.max(24, e.props.bodyColumns || 40)
+  const barW = Math.max(6, Math.min(20, cols - 34))
+  const row = (a: AgentRun) => {
+    const tier = tierOf(a.type)
+    const color = colorOf(tier)
+    const ctx = ctxOf(a)
+    const progress = progressOf(a)
+    const model = runModel(a)
+    const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
+    return (
+      <Box key={a.id} flexDirection="column" marginBottom={1}>
+        <Box flexDirection="row" gap={1}>
+          <Text color={color}>▣</Text>
+          <Text bold wrap="truncate-end">
+            {a.description || a.type}
+          </Text>
+          <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
+        </Box>
+        <Text dimColor wrap="truncate-end">
+          {'  '}
+          {tier === 'other' ? a.type : tierWord(tier)} · {model}
+          {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
+        </Text>
+        <Text wrap="truncate-end">
+          {'  '}
+          {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
+          <Text dimColor>
+            {' '}
+            {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
+          </Text>
+        </Text>
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column">
+      {!isEmbedded && (
+        <Text>
+          {LOGO_TEXT_PARTS.map((d, i) => <Text key={`logo:${i}`} color={d.color}>{d.glyph}</Text>)}
+          <Text bold> flow</Text>
+          <Text dimColor> agents</Text>
+        </Text>
+      )}
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text bold wrap="truncate-end">
+          {title}
+        </Text>
+        {toggleCompact}
+      </Box>
+      <Text dimColor>
+        ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
+      </Text>
+      {p.isCompact ? (
+        <Text wrap="truncate-end">
+          {[...running, ...finished].map(a => (
+            <Text key={a.id} color={colorOf(tierOf(a.type))}>
+              {STATUS_GLYPH[a.status]}{' '}
+            </Text>
+          ))}
+          {planned.map(pl => (
+            <Text key={`plan-${pl.n}`} dimColor>
+              ◷{' '}
+            </Text>
+          ))}
+        </Text>
+      ) : (
+        <Box flexDirection="column" marginTop={1}>
+          {isEmpty && <Text dimColor>{s.empty}</Text>}
+          {running.length > 0 && <Text dimColor>{s.running} · {running.length}</Text>}
+          {running.map(row)}
+          {finished.length > 0 && toggleDone}
+          {!p.isDoneCollapsed && finished.map(row)}
+          {planned.length > 0 && <Text dimColor>{s.planned} · {planned.length}</Text>}
+          {planned.map(pl => {
+            const tier = pl.tier in TIER_COLOR ? pl.tier : 'other'
+            return (
+              <Box key={`plan-${pl.n}`} flexDirection="column" marginBottom={1}>
+                <Text dimColor wrap="truncate-end">
+                  <Text color={colorOf(tier)}>▢</Text> {pl.n}. {pl.title} ◷
+                </Text>
+                <Text dimColor wrap="truncate-end">
+                  {'  '}
+                  {tierWord(tier)} · {tierModel(tier)}
+                  {pl.after.length ? ` · ${s.after} ${pl.after.join(', ')}` : ''}
+                </Text>
+              </Box>
+            )
+          })}
+        </Box>
+      )}
+    </Box>
+  )
 }
 
 export function registerProgress(on: Parameters<Register>[0], options: Record<string, unknown>): void {
@@ -868,7 +1054,7 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
     })
     await $.command.register({
       name: 'flow-agents',
-      description: 'Show or hide the panel of subagents: running, finished and planned, with model, context, cost and time',
+      description: 'Show or hide the Agents tab of the flow chart: subagents running, finished and planned, with model, context, cost and time',
     })
 
     // Ticks the running agents' clocks; quiet when nothing runs.
@@ -888,7 +1074,7 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
     if ((e.args ?? '').trim() === 'open') {
       const at = await $.clock.now()
       await update($, now, () => at)
-      await $.ui.open({ id: PANE, title: tr().pane })
+      await showAgents($)
       return { text: tr().opened }
     }
     const isOpen = await togglePane($)
@@ -1049,190 +1235,12 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
     return next(e)
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const s = tr()
-    const ui = $.ui.resolve(e)
-    const { Box, Text, Button } = ui
-    const list = await read($, agents)
-    const f = await read($, flow)
-    const p: Panel = await read($, panel)
-    const at = Math.max(await read($, now), ...list.map(a => a.startedAt), 0)
-
-    const running = list.filter(a => a.status === 'running').reverse()
-    const finished = list.filter(a => a.status !== 'running').reverse()
-    const planned = plannedOf(f, list)
-    const t = totals(list, at)
-    // The pane's title says "Agents"; inside, only the flow's own name.
-    const title = f && !f.isFinished ? f.title : ''
-
-    const toggleCompact = (
-      <Button
-        key="compact"
-        label={p.isCompact ? s.expand : s.collapse}
-        plain
-        onPress={() => update($, panel, prev => ({ ...prev, isCompact: !prev.isCompact }))}
-      />
-    )
-    const toggleDone = (
-      <Button
-        key="done"
-        label={`${p.isDoneCollapsed ? (isRtl() ? '◂' : '▸') : '▾'} ${s.finished} · ${finished.length}`}
-        plain
-        onPress={() => update($, panel, prev => ({ ...prev, isDoneCollapsed: !prev.isDoneCollapsed }))}
-      />
-    )
-    const isEmpty = list.length === 0 && planned.length === 0
-    const summary = `≈${fmtCost(t.cost)}, ${fmtTokens(t.tokens)} ${s.tokensWord}, ${fmtTime(t.time)}`
-
-    if (e.surface === 'desktop' && 'Svg' in ui) {
-      const { Svg } = ui
-      const W = Math.max(240, Math.min(900, (e.props.bodyColumns || 40) * 8 - 8))
-      const section = (key: string, text: string) => (
-        <Text key={key} dimColor>
-          {text}
-        </Text>
-      )
-
-      // In Hebrew the column hugs the right edge: section heads and buttons right-aligned.
-      const align = isRtl() ? 'flex-end' : undefined
-      if (p.isCompact) {
-        return (
-          <Box flexDirection="column" gap={1} alignItems={align}>
-            <Svg source={compactSvg(W, list, planned, t)} alt={`${list.length} ${s.agentsCount}, ${summary}`} width={W} height={32} />
-            {toggleCompact}
-          </Box>
-        )
-      }
-      const shownDone = p.isDoneCollapsed ? 0 : finished.length
-      const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-      const gridH = BRAND_H + headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
-      return (
-        <Box flexDirection="column">
-          {/* The grid sizes the pane; the content is placed over it, as an
-              absolute Box paints over the siblings before it. */}
-          {gridTiles(gridH).map((tileH, i) => (
-            <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
-          ))}
-          <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
-            <Svg source={brandSvg(W)} alt="flow agents" width={W} height={BRAND_H} />
-            <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
-            {toggleCompact}
-            {isEmpty && <Text dimColor>{s.empty}</Text>}
-            {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
-            {running.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
-            ))}
-            {finished.length > 0 && toggleDone}
-            {!p.isDoneCollapsed &&
-              finished.map(a => (
-                <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
-              ))}
-            {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
-            {planned.map(pl => (
-              <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={46} />
-            ))}
-          </Box>
-        </Box>
-      )
-    }
-
-    // Terminal: the same content in text rows.
-    const cols = Math.max(24, e.props.bodyColumns || 40)
-    const barW = Math.max(6, Math.min(20, cols - 34))
-    const row = (a: AgentRun) => {
-      const tier = tierOf(a.type)
-      const color = colorOf(tier)
-      const ctx = ctxOf(a)
-      const progress = progressOf(a)
-      const model = runModel(a)
-      const steps = a.stepTotal ? `${a.stepDone ?? 0}/${a.stepTotal}${a.stepNote ? ' ' + a.stepNote : ''} · ` : ''
-      return (
-        <Box key={a.id} flexDirection="column" marginBottom={1}>
-          <Box flexDirection="row" gap={1}>
-            <Text color={color}>▣</Text>
-            <Text bold wrap="truncate-end">
-              {a.description || a.type}
-            </Text>
-            <Text color={a.status === 'failed' ? 'red' : a.status === 'done' ? 'green' : color}>{STATUS_GLYPH[a.status]}</Text>
-          </Box>
-          <Text dimColor wrap="truncate-end">
-            {'  '}
-            {tier === 'other' ? a.type : tierWord(tier)} · {model}
-            {a.round > 1 ? ` · ${s.round} ${a.round}` : ''}
-          </Text>
-          <Text wrap="truncate-end">
-            {'  '}
-            {progress === null ? <Text dimColor>{ctxBar(ctx, barW)}</Text> : <Text color={color}>{ctxBar(progress * 100, barW)}</Text>}
-            <Text dimColor>
-              {' '}
-              {steps}{s.ctx} {ctx}% · {fmtTokens(a.contextTokens)} ≈{fmtCost(a.costUsd)} {fmtTime(elapsed(a, at))}
-            </Text>
-          </Text>
-        </Box>
-      )
-    }
-
-    return (
-      <Box flexDirection="column">
-        <Text>
-          {LOGO_TEXT_PARTS.map((d, i) => <Text key={`logo:${i}`} color={d.color}>{d.glyph}</Text>)}
-          <Text bold> flow</Text>
-          <Text dimColor> agents</Text>
-        </Text>
-        <Box flexDirection="row" justifyContent="space-between">
-          <Text bold wrap="truncate-end">
-            {title}
-          </Text>
-          {toggleCompact}
-        </Box>
-        <Text dimColor>
-          ≈{fmtCost(t.cost)} · {fmtTokens(t.tokens)} {s.tokensWord} · {fmtTime(t.time)}
-        </Text>
-        {p.isCompact ? (
-          <Text wrap="truncate-end">
-            {[...running, ...finished].map(a => (
-              <Text key={a.id} color={colorOf(tierOf(a.type))}>
-                {STATUS_GLYPH[a.status]}{' '}
-              </Text>
-            ))}
-            {planned.map(pl => (
-              <Text key={`plan-${pl.n}`} dimColor>
-                ◷{' '}
-              </Text>
-            ))}
-          </Text>
-        ) : (
-          <Box flexDirection="column" marginTop={1}>
-            {isEmpty && <Text dimColor>{s.empty}</Text>}
-            {running.length > 0 && <Text dimColor>{s.running} · {running.length}</Text>}
-            {running.map(row)}
-            {finished.length > 0 && toggleDone}
-            {!p.isDoneCollapsed && finished.map(row)}
-            {planned.length > 0 && <Text dimColor>{s.planned} · {planned.length}</Text>}
-            {planned.map(pl => {
-              const tier = pl.tier in TIER_COLOR ? pl.tier : 'other'
-              return (
-                <Box key={`plan-${pl.n}`} flexDirection="column" marginBottom={1}>
-                  <Text dimColor wrap="truncate-end">
-                    <Text color={colorOf(tier)}>▢</Text> {pl.n}. {pl.title} ◷
-                  </Text>
-                  <Text dimColor wrap="truncate-end">
-                    {'  '}
-                    {tierWord(tier)} · {tierModel(tier)}
-                    {pl.after.length ? ` · ${s.after} ${pl.after.join(', ')}` : ''}
-                  </Text>
-                </Box>
-              )
-            })}
-          </Box>
-        )}
-      </Box>
-    )
-  })
+  // A flow-agents pane left open by an earlier version still draws.
+  on('ui.render', { component: 'Pane', requestId: PANE }, ($, e) => agentsView($, e))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const f = await read($, flow)
-    if (f === null || e.props.hasSurvey) return next(e)
+    if (e.props.hasSurvey || (f === null && options.bar === 'flow')) return next(e)
     // Draw this row with the other mods' bands beneath it. Claude Code's own placeholder ({ type: 'engine' }) is
     // never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)
@@ -1241,6 +1249,22 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const list = await read($, agents)
+
+    // The `bar` option: `always` (the default) keeps an idle row up between flows; `flow` draws it only during one.
+    if (f === null) {
+      const running = list.filter(a => a.status === 'running').length
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={2}>
+            <Text color={running > 0 ? ACCENT : DONE}>●</Text>
+            <Text dimColor>{running > 0 ? `${tr().busy} · ${running}` : tr().idle}</Text>
+            <Text color={CLAY}>▣</Text>
+            <Button key="flow-agents" label={`×${list.length}`} plain onPress={() => void togglePane($)} />
+          </Box>
+          {below}
+        </Box>
+      )
+    }
     const crew = list.length + plannedOf(f, list).length
     const isWorking = list.some(a => a.status === 'running')
     const crewButton = (

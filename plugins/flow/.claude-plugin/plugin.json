@@ -16,13 +16,23 @@
     },
     "autoOpen": {
       "type": "string",
-      "title": "Open the agents panel",
-      "description": "flow: open it when flow workers start; any: for any subagent; off: only with /flow-agents.",
+      "title": "Open the Agents tab",
+      "description": "flow: open the flow chart on its Agents tab when flow workers start; any: for any subagent; off: only with /flow-agents.",
       "default": "flow",
       "options": [
         "flow",
         "any",
         "off"
+      ]
+    },
+    "bar": {
+      "type": "string",
+      "title": "Progress bar",
+      "description": "always: keep the bar above the prompt in every chat, idle between flows; flow: only while a flow runs.",
+      "default": "always",
+      "options": [
+        "always",
+        "flow"
       ]
     }
   }

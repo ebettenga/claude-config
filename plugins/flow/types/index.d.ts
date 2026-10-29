@@ -295,7 +295,7 @@ export type Run = {
 // ---------------------------------------------------------------------------
 // The /flow-chart hub pane (hooks/hub.tsx).
 
-export type HubTab = 'workflows' | 'runs' | 'skills'
+export type HubTab = 'workflows' | 'runs' | 'agents' | 'skills'
 
 /** The inline file browser under a file or folder input. */
 /** The open file chooser: suggestions (with a search) or the folder browser. */
