@@ -283,7 +283,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         )
       return (
         <Box flexDirection="row" alignItems="center" gap={1} paddingBottom="xs">
-          {Svg ? <Svg source={logoSvg(28, C.pane, active.length > 0)} alt="flow logo" width={28} height={28} /> : null}
+          {Svg ? <Svg source={logoSvg(28, C.pane, active.length > 0)} alt="flow logo" width={28} height={28} isInteractive={active.length > 0 || undefined} /> : null}
           <Text size="title" weight="bold">flow</Text>
           <Box flexGrow={1} />
           <Text dimColor size="footnote" weight="medium">{sub.toUpperCase()}</Text>
@@ -306,7 +306,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const size = isPage ? 40 : 24
       return (
         <Box key={key} flexDirection="column" alignItems="center" justifyContent="center" gap="sm" paddingY={isPage ? 'xl' : 'md'} width="100%">
-          {Svg ? <Svg source={logoSvg(size, undefined, true)} alt="" width={size} height={size} /> : null}
+          {Svg ? <Svg source={logoSvg(size, undefined, true)} alt={label} width={size} height={size} isInteractive /> : null}
           <Text dimColor size="footnote">{label}</Text>
         </Box>
       )
