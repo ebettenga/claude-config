@@ -522,8 +522,8 @@ const totals = (list: AgentRun[], at: number) => {
 // The pane's backdrop: a dotted grid as tall as the content laid over it; the
 // row SVGs are transparent, so it shows through between their marks.
 const GRID_STEP = 16
-// A Text or Button row on the desktop is about 20px; the grid errs taller.
-const LINE_H = 24
+// A Text or Button row on the desktop is about 20px, plus its xs padding; the grid errs taller.
+const LINE_H = 30
 // The engine refuses an Svg taller than 4096px, so a long grid is stacked from
 // tiles of at most this height; a multiple of GRID_STEP keeps the dots aligned.
 const GRID_TILE = 4096
@@ -696,16 +696,25 @@ const rowCrab = (W: number, x: number, y: number, costume: string, dim = false, 
 const svg = (W: number, H: number, body: string): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${PANE_CSS}${CRAB_CSS}${body}</svg>`
 
+// Agent and planned rows are drawn `pad` px down in a drawing 2 × `pad` taller: space between rows.
+const AGENT_PAD = 6
+const AGENT_H = 66 + AGENT_PAD * 2
+const PLANNED_PAD = 4
+const PLANNED_H = 46 + PLANNED_PAD * 2
+const padded = (W: number, H: number, pad: number, body: string): string => svg(W, H, `<g transform="translate(0 ${pad})">${body}</g>`)
+
 // The pane's own title already says "Agents": the header names the flow, if any.
 const headerSvg = (W: number, title: string, t: ReturnType<typeof totals>): string => {
   const s = tr()
-  const gap = 6
+  const gap = 10
   const tw = (W - gap * 2) / 3
-  const top = title ? 28 : 0
+  const top = (title ? 30 : 0) + HEADER_PAD
+  // Each tile's label and value sit centred in it.
+  const mid = (i: number) => mx(W, i * (tw + gap), tw) + tw / 2
   const tile = (i: number, k: string, v: string) =>
-    `<rect class="tile" x="${mx(W, i * (tw + gap), tw)}" y="${top}" width="${tw}" height="40" rx="8"/>
-<text class="s" ${startText(W, i * (tw + gap) + 9, top + 16)} font-family="${FONT}" font-size="11">${k}</text>
-<text class="t" ${startText(W, i * (tw + gap) + 9, top + 33, false)} font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
+    `<rect class="tile" x="${mx(W, i * (tw + gap), tw)}" y="${top}" width="${tw}" height="${TILE_H}" rx="10"/>
+<text class="s" x="${mid(i)}" y="${top + 21}" text-anchor="middle"${isRtl() ? ' direction="rtl"' : ''} font-family="${FONT}" font-size="11">${k}</text>
+<text class="t" x="${mid(i)}" y="${top + 41}" text-anchor="middle" font-family="${FONT}" font-size="15" font-weight="600" font-variant-numeric="tabular-nums">${v}</text>`
   return svg(
     W,
     headerHeight(title),
@@ -714,7 +723,10 @@ ${tile(0, s.cost, '≈' + fmtCost(t.cost))}${tile(1, s.tokens, fmtTokens(t.token
   )
 }
 
-const headerHeight = (title: string): number => (title ? 72 : 44)
+const HEADER_PAD = 6
+const TILE_H = 54
+// The tiles, with HEADER_PAD above and twice that below, under the title when there is one.
+const headerHeight = (title: string): number => (title ? 30 : 0) + HEADER_PAD * 3 + TILE_H
 
 // The pane's first line: flow's logo and "flow agents".
 const BRAND_H = 34
@@ -750,9 +762,10 @@ const agentSvg = (W: number, a: AgentRun, at: number): string => {
   const stepsW = Math.max(0, barW - textWidth(stats, 11) - 12)
   // Without reported steps the bar falls back to the context, drawn grey.
   const fillW = Math.round(barW * (progress ?? ctx / 100))
-  return svg(
+  return padded(
     W,
-    66,
+    AGENT_H,
+    AGENT_PAD,
     `${rowCrab(W, 0, 14, costumeOf(a.type), false, a.status === 'running')}
 <text class="t" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(a.description || a.type, 13, textW))}</text>
 <text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tier === 'other' ? a.type : tierWord(tier))}</tspan><tspan class="s">  ${xml(meta.join('  ·  '))}</tspan></text>
@@ -770,9 +783,10 @@ const plannedSvg = (W: number, p: Planned): string => {
   const textW = W - 42 - 22
   const meta = [tierModel(tier)]
   if (p.after.length) meta.push(`${tr().after} ${p.after.join(', ')}`)
-  return svg(
+  return padded(
     W,
-    46,
+    PLANNED_H,
+    PLANNED_PAD,
     `${rowCrab(W, 0, 6, tier, true)}
 <text class="s" ${startText(W, 42, 18)} font-family="${FONT}" font-size="13" font-weight="600">${xml(fitText(`${p.n}. ${p.title}`, 13, textW))}</text>
 <text ${startText(W, 42, 34)} font-family="${FONT}" font-size="11"><tspan fill="${color}">${xml(tierWord(tier))}</tspan><tspan class="m">  ${xml(meta.filter(Boolean).join('  ·  '))}</tspan></text>
@@ -873,9 +887,9 @@ export async function agentsView($: EngineInterface, e: PaneEvent, isEmbedded = 
     const { Svg } = ui
     const W = Math.max(240, Math.min(900, (e.props.bodyColumns || 40) * 8 - 8))
     const section = (key: string, text: string) => (
-      <Text key={key} dimColor>
-        {text}
-      </Text>
+      <Box key={key} paddingTop="xs">
+        <Text dimColor>{text}</Text>
+      </Box>
     )
 
     // In Hebrew the column hugs the right edge: section heads and buttons right-aligned.
@@ -891,7 +905,7 @@ export async function agentsView($: EngineInterface, e: PaneEvent, isEmbedded = 
     const shownDone = p.isDoneCollapsed ? 0 : finished.length
     const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
     const brandH = isEmbedded ? 0 : BRAND_H
-    const gridH = brandH + headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+    const gridH = brandH + headerHeight(title) + lines * LINE_H + (running.length + shownDone) * AGENT_H + planned.length * PLANNED_H
     return (
       <Box flexDirection="column">
         {/* The grid sizes the pane; the content is placed over it, as an
@@ -906,16 +920,16 @@ export async function agentsView($: EngineInterface, e: PaneEvent, isEmbedded = 
           {isEmpty && <Text dimColor>{s.empty}</Text>}
           {running.length > 0 && section('h-run', `${s.running} · ${running.length}`)}
           {running.map(a => (
-            <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={66} />
+            <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isRunning}`} width={W} height={AGENT_H} />
           ))}
-          {finished.length > 0 && toggleDone}
+          {finished.length > 0 && <Box paddingTop="xs">{toggleDone}</Box>}
           {!p.isDoneCollapsed &&
             finished.map(a => (
-              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={66} />
+              <Svg key={a.id} source={agentSvg(W, a, at)} alt={`${a.description}: ${modelName(a.model)}, ${s.isFinished}`} width={W} height={AGENT_H} />
             ))}
           {planned.length > 0 && section('h-plan', `${s.planned} · ${planned.length}`)}
           {planned.map(pl => (
-            <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={46} />
+            <Svg key={`plan-${pl.n}`} source={plannedSvg(W, pl)} alt={`${pl.n}. ${pl.title}: ${s.isPlanned}`} width={W} height={PLANNED_H} />
           ))}
         </Box>
       </Box>
@@ -1280,7 +1294,7 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
         const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 72))
         return (
           <Box flexDirection="column">
-            <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
+            <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1} paddingTop="xs">
               <Svg source={idleSvg(width, status, running > 0)} alt={`flow: ${status}`} width={width} height={H} />
               <Button key="flow-agents" label={`×${list.length}`} plain onPress={() => void togglePane($)} />
             </Box>
@@ -1324,7 +1338,7 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
       const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 96))
       return (
         <Box flexDirection="column">
-          <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
+          <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1} paddingTop="xs">
             <Svg source={rowSvg(f, width, isWorking)} alt={`${f.title}: ${label(f)}, ${percent}`} width={width} height={H} />
             {crewButton}
             {dismiss}
