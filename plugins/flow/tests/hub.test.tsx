@@ -413,6 +413,38 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
+  test(`the Skills tab lists MCP servers with their tools, and its sections fold (${surface})`, async ($, on) => {
+    const w = world(on, { [`${FLOWS}/csv/flow.yaml`]: CSV })
+    on('tool.list', () => ({
+      value: [
+        { name: 'Read', description: 'Reads a file', mcp: false },
+        { name: 'mcp__shopify__list-orders', description: 'Orders', mcp: true },
+        { name: 'mcp__shopify__get-order', description: 'One order', mcp: true },
+        { name: 'mcp__google-drive__search', description: 'Search Drive', mcp: true },
+      ],
+    }))
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'tab:skills' })
+    await w.clock.settle()
+    let all = await texts(ui)
+    expect(all).toContain('MCP SERVERS')
+    expect(all).toContain('2 tools: get-order, list-orders')
+    expect(all).toContain('google-drive')
+    expect(all).not.toContain('Reads a file')
+    await ui.press({ key: 'use:mcp:shopify' })
+    expect(w.fills).toEqual(['Using the shopify MCP server, '])
+    await ui.press({ key: 'fold:skills:MCP servers' })
+    all = await texts(ui)
+    expect(all).toContain('MCP SERVERS')
+    expect(all).not.toContain('google-drive')
+    await ui.press({ key: 'fold:skills:Workflows' })
+    expect(await ui.find({ type: 'Button', key: 'use:wf:csv' })).toBeFalsy()
+    await ui.press({ key: 'fold:skills:Workflows' })
+    expect(await ui.find({ type: 'Button', key: 'use:wf:csv' })).toBeTruthy()
+    await ui.unmount()
+  })
+
   test(`a for_each step: the Running now card, its items, and a chosen item's log (${surface})`, async ($, on) => {
     const w = world(on, { [`${FLOWS}/each/flow.yaml`]: EACH })
     await begin($, surface)

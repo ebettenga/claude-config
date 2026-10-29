@@ -309,7 +309,10 @@ export type CatalogItem = {
   path: string
 }
 
-export type HubCatalog = { skills: CatalogItem[]; agents: CatalogItem[]; at: number }
+/** One connected MCP server, from the tools the model can call: its name and its tools. */
+export type CatalogServer = { name: string; tools: string[] }
+
+export type HubCatalog = { skills: CatalogItem[]; agents: CatalogItem[]; mcp: CatalogServer[]; at: number }
 
 /** Form values by workflow id, then input id. */
 export type HubForms = Record<string, Record<string, string>>

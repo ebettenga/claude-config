@@ -4,7 +4,7 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import type { CatalogItem, HubCatalog, ItemRun, OutputSpec, Run, RunStatus, StepKind, StepRun, StepSpec, StepStatus, Workflow } from '../types'
+import type { CatalogItem, CatalogServer, HubCatalog, ItemRun, OutputSpec, Run, RunStatus, StepKind, StepRun, StepSpec, StepStatus, Workflow } from '../types'
 import { fill, isAIStep } from './spec'
 import type { TemplateContext } from './spec'
 import { BY_EXTENSION, BY_FILE_NAME, BY_FOLDER_NAME, ICON_FILE, ICON_FOLDER } from './icons'
@@ -413,5 +413,22 @@ export async function loadCatalog($: EngineInterface): Promise<HubCatalog> {
       await agentsIn(`${root}/agents`, plugin.name)
     }
   }
-  return { skills, agents, at: Date.now() }
+  return { skills, agents, mcp: await mcpServers($), at: Date.now() }
+}
+
+/**
+ * The connected MCP servers and their tools, from the tools the model can call
+ * now: an MCP tool is named mcp__<server>__<tool>. A server whose tools are all
+ * deferred or refused does not show.
+ */
+async function mcpServers($: EngineInterface): Promise<CatalogServer[]> {
+  const tools = await $.tool.list().catch(() => [])
+  const byServer = new Map<string, string[]>()
+  for (const t of tools) {
+    const m = /^mcp__(.+?)__(.+)$/.exec(t.name)
+    if (!t.mcp || !m) continue
+    const [, server = '', tool = ''] = m
+    byServer.set(server, [...(byServer.get(server) ?? []), tool])
+  }
+  return [...byServer].map(([name, list]) => ({ name, tools: list.sort() })).sort((a, b) => a.name.localeCompare(b.name))
 }

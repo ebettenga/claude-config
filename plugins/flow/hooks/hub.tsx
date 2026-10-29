@@ -66,7 +66,7 @@ const LOG_LINES = 40
 const SUMMARY_LINES = 80
 const SUMMARY_CHARS = 20_000
 
-const EMPTY_CATALOG: HubCatalog = { skills: [], agents: [], at: 0 }
+const EMPTY_CATALOG: HubCatalog = { skills: [], agents: [], mcp: [], at: 0 }
 
 // The runner's atoms and hub-state.ts's, made again here: the scan reads an
 // atom only where a const of the same file makes it (same keys, same tags).
@@ -80,7 +80,7 @@ const hubPicker = atom({ plugin: 'flow', key: 'hubPicker' } as const, null as Hu
 const hubQuery = atom({ plugin: 'flow', key: 'hubQuery' } as const, '', { shape: 'hub-query-1' })
 const hubLogStep = atom({ plugin: 'flow', key: 'hubLogStep' } as const, '', { shape: 'hub-log-1' })
 const hubFrame = atom({ plugin: 'flow', key: 'hubFrame' } as const, 0, { shape: 'hub-frame-1' })
-const hubCatalog = atom({ plugin: 'flow', key: 'hubCatalog' } as const, EMPTY_CATALOG, { shape: 'hub-catalog-1' })
+const hubCatalog = atom({ plugin: 'flow', key: 'hubCatalog' } as const, EMPTY_CATALOG, { shape: 'hub-catalog-2' })
 const hubEnv = atom({ plugin: 'flow', key: 'hubEnv' } as const, {} as HubEnv, { shape: 'hub-env-1' })
 const hubAttempts = atom({ plugin: 'flow', key: 'hubAttempts' } as const, {} as HubAttempts, { shape: 'hub-attempts-1' })
 const hubOpenResults = atom({ plugin: 'flow', key: 'hubOpenResults' } as const, {} as HubOpenResults, { shape: 'hub-open-results-1' })
@@ -1429,29 +1429,55 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     // ── 4. Skills ──
 
     function skillsList(): RenderChildren[] {
-      const total = loaded.length + catalog.skills.length + catalog.agents.length
+      const servers = catalog.mcp ?? []
+      const total = loaded.length + catalog.skills.length + catalog.agents.length + servers.length
       const isLoading = catalog.at === 0
       const use = (text: string) => () => fillPrompt(text)
-      const group = (title: string, color: string, kind: string, label: string, items: { key: string; name: string; description: string; onPress: () => void }[], wait = false) =>
-        card(`group:${title}`, [
-          heading(title, wait ? '' : String(items.length)),
-          ...(items.length
-            ? items.map(it =>
-                tile(`row:${it.key}`, {
-                  color,
-                  label: kind,
-                  right: isDesktop ? <Button key={`use:${it.key}`} plain onPress={it.onPress}>{label}</Button> : <Button key={`use:${it.key}`} onPress={it.onPress}>{label}</Button>,
-                  title: <Text weight="semibold" wrap="truncate-end">{it.name}</Text>,
-                  sub: it.description,
-                }),
-              )
-            : [<Text dimColor size="footnote">{wait ? 'Looking…' : 'None found'}</Text>]),
+      type Row = { key: string; name: string; description: string; onPress: () => void }
+      // Each section folds shut from its title line (this viewer's, kept for the session).
+      const group = (title: string, color: string, kind: string, label: string, items: Row[], wait = false) => {
+        const foldKey = `skills:${title}`
+        const isFolded = folded[foldKey] === true
+        const count = wait ? '' : String(items.length)
+        const head = (
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Button key={`fold:${foldKey}`} plain onPress={() => void update($, hubFolded, all => ({ ...all, [foldKey]: !isFolded }))}>
+                <Text size="footnote" weight="bold" dimColor>{`${isFolded ? '▸' : '▾'} ${title.toUpperCase()}`}</Text>
+              </Button>
+            </Box>
+            <Text size="footnote" weight="bold" dimColor>{count}</Text>
+          </Box>
+        )
+        return card(`group:${title}`, [
+          head,
+          ...(isFolded
+            ? []
+            : items.length
+              ? items.map(it =>
+                  tile(`row:${it.key}`, {
+                    color,
+                    label: kind,
+                    right: isDesktop ? <Button key={`use:${it.key}`} plain onPress={it.onPress}>{label}</Button> : <Button key={`use:${it.key}`} onPress={it.onPress}>{label}</Button>,
+                    title: <Text weight="semibold" wrap="truncate-end">{it.name}</Text>,
+                    sub: it.description,
+                  }),
+                )
+              : [<Text dimColor size="footnote">{wait ? 'Looking…' : 'None found'}</Text>]),
         ])
+      }
+      const serverRow = (m: { name: string; tools: string[] }): Row => ({
+        key: `mcp:${m.name}`,
+        name: m.name,
+        description: `${plural(m.tools.length, 'tool')}: ${m.tools.join(', ')}`,
+        onPress: use(`Using the ${m.name} MCP server, `),
+      })
       return [
         heading('Everything Claude can use', isLoading ? '' : String(total)),
         group('Workflows', C.blue, 'workflow', 'Open', loaded.map(f => ({ key: `wf:${f.id}`, name: f.workflow.title, description: firstSentence(f.workflow.description), onPress: () => void showWorkflow($, f.id) }))),
         group('Skills', C.add, 'skill', 'Use', catalog.skills.map(s => ({ key: `skill:${s.name}`, name: s.name, description: s.description, onPress: use(s.fill) })), isLoading),
         group('Agents', C.read, 'agent', 'Use', catalog.agents.map(a => ({ key: `agent:${a.name}`, name: a.name, description: a.description, onPress: use(a.fill) })), isLoading),
+        group('MCP servers', C.teal, 'mcp', 'Use', servers.map(serverRow), isLoading),
       ]
     }
   })
