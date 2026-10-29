@@ -247,6 +247,51 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         : <Text color={color} bold>{text}</Text>
     }
 
+    /**
+     * A row in the step chips' look: a coloured ● LABEL line (with whatever
+     * sits right of it), a semibold title and a dim sub-line, in a rounded tile.
+     */
+    function tile(key: string, o: { color: string; label: string; right?: RenderChildren; title: RenderChildren; sub?: string; body?: RenderChildren; isLit?: boolean; fill?: string }) {
+      if (!isDesktop)
+        return (
+          <Box key={key} flexDirection="column">
+            <Box flexDirection="row" gap={1}>
+              <Text color={o.color} bold>{`● ${o.label.toUpperCase()}`}</Text>
+              <Box flexGrow={1} />
+              {o.right ?? null}
+            </Box>
+            {o.title}
+            {o.sub ? <Text dimColor wrap="truncate-end">{o.sub}</Text> : null}
+            {o.body ?? null}
+          </Box>
+        )
+      return (
+        <Box
+          key={key}
+          flexDirection="column"
+          paddingX={1}
+          paddingY="xs"
+          backgroundColor={o.fill ?? (o.isLit ? tint(o.color, '26') : C.chip)}
+          borderStyle="round"
+          borderColor={o.isLit ? o.color : C.border}
+          minWidth={0}
+          overflow="hidden"
+          hover={{ backgroundColor: tint(o.color, '1f') }}
+        >
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Box flexShrink={1} minWidth={0} overflow="hidden">
+              <Text color={o.color} size="caption" weight="bold" wrap="truncate-end">{`● ${o.label.toUpperCase()}`}</Text>
+            </Box>
+            <Box flexGrow={1} />
+            {o.right ?? null}
+          </Box>
+          <Box minWidth={0} overflow="hidden">{o.title}</Box>
+          {o.sub ? <Text dimColor size="footnote" wrap="truncate-end">{o.sub}</Text> : null}
+          {o.body ?? null}
+        </Box>
+      )
+    }
+
     function bar(pct: number, color: string) {
       return Svg
         ? <Svg source={barSvg(px - 40, pct, color)} alt={`${Math.round(pct * 100)}% done`} width={Math.max(1, Math.round(px - 40))} height={6} />
@@ -839,22 +884,50 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       return [
         heading('Runs', String(runs.length)),
         <Box flexDirection="column" gap="xs">
-          {runs.map(r => (
-            <Box key={`runrow:${r.id}`} flexDirection="row" justifyContent="space-between" alignItems="center" gap={1} paddingX={isDesktop ? 1 : 0} paddingY={isDesktop ? 'xs' : 0} backgroundColor={isDesktop ? C.tile : undefined}>
-              <Box flexShrink={1} minWidth={0} overflow="hidden">
+          {runs.map(r => {
+            const color = RUN_COLOR[r.status]
+            const p = progressOf(r)
+            return tile(`runrow:${r.id}`, {
+              color,
+              label: r.status === 'running' ? `running${['...', '.  ', '.. ', '...'][frame % 4]}` : r.status,
+              isLit: r.status === 'running' || r.status === 'waiting',
+              right: <Text dimColor size="footnote" tabular>{duration((r.endedAt ?? now) - r.startedAt)}</Text>,
+              title: (
                 <Button key={`open:${r.id}`} plain onPress={() => void showRun($, r.id)}>
                   <Text weight="semibold" wrap="truncate-end">{r.title}</Text>
-                  <Text dimColor wrap="truncate-end">{`  ${ago(r.startedAt, now)}`}</Text>
                 </Button>
-              </Box>
-              <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
-                {statusPill(r)}
-                <Text dimColor size="footnote" tabular>{duration((r.endedAt ?? now) - r.startedAt)}</Text>
-              </Box>
-            </Box>
-          ))}
+              ),
+              sub: [`started ${ago(r.startedAt, now)}`, `${p.settled} of ${p.total} steps`, r.parent ? 'child run' : ''].filter(Boolean).join(' · '),
+              body: (
+                <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+                  <Box flexShrink={1} minWidth={0} overflow="hidden">
+                    <Text size="footnote" color={r.status === 'failed' || r.status === 'waiting' ? color : undefined} dimColor={r.status !== 'failed' && r.status !== 'waiting'} wrap="truncate-end">{runOutcome(r)}</Text>
+                  </Box>
+                  <Text size="footnote">
+                    {r.steps.map(s => <Text key={`m:${r.id}:${s.id}`} color={s.status === 'running' ? color : MARK[s.status].color}>{MARK[s.status].glyph}</Text>)}
+                  </Text>
+                </Box>
+              ),
+            })
+          })}
         </Box>,
       ]
+    }
+
+    /** One line on how a run went: where it stopped and why, or what it is doing. */
+    function runOutcome(r: Run): string {
+      const at = (st: StepRun) => st.id.replace(/[_-]+/g, ' ')
+      const failed = r.steps.find(s => s.status === 'failed')
+      if (failed) {
+        const why = firstLine(failed.error ?? '') || firstLine(failed.tail.trim().split('\n').slice(-1)[0] ?? '')
+        return `failed at ${at(failed)}${why ? `: ${why}` : ''}`
+      }
+      const waiting = r.steps.find(s => s.status === 'waiting')
+      if (waiting) return `waiting at ${at(waiting)}`
+      const going = r.steps.find(s => s.status === 'running')
+      if (going) return `running ${at(going)}`
+      if (r.status === 'done') return `${plural(r.steps.filter(s => s.status === 'done').length, 'step')} done · run ${r.id}`
+      return `run ${r.id}`
     }
 
     /** The log shown: the chosen step or item, else what is going now, else what ended last. */
@@ -923,19 +996,22 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
                     ? duration(it.endedAt - it.startedAt)
                     : it.status
               const itemKey = `${feSpec.id}[${i}]`
-              return (
-                <Box key={`item:${itemKey}`} flexDirection="row" justifyContent="space-between" alignItems="center" gap={1} paddingX={isDesktop ? 1 : 0} paddingY={isDesktop ? 'xs' : 0} backgroundColor={isDesktop ? (isRunning ? tint(color) : C.tile) : undefined}>
-                  <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0} overflow="hidden">
-                    <Text color={isRunning ? color : mark.color} weight="bold">{mark.glyph}</Text>
-                    <Box flexShrink={1} minWidth={0} overflow="hidden">
-                      <Button key={`itm:${itemKey}`} plain onPress={() => void update($, hubLogStep, () => itemKey)}>
-                        <Text color={isRunning ? shades(color)[2] : undefined} weight={isRunning || key === itemKey ? 'semibold' : 'regular'} wrap="truncate-end">{firstLine(it.value) || `item ${i + 1}`}</Text>
-                      </Button>
-                    </Box>
+              return tile(`item:${itemKey}`, {
+                color,
+                label: `${feSpec.as ?? 'item'} ${i + 1}`,
+                isLit: isRunning || key === itemKey,
+                right: (
+                  <Box flexDirection="row" gap={1} alignItems="center">
+                    <Text color={isRunning ? color : undefined} dimColor={!isRunning} size="footnote" weight="medium">{right}</Text>
+                    <Text color={isRunning ? color : mark.color} weight="bold" size="footnote">{mark.glyph}</Text>
                   </Box>
-                  <Text color={isRunning ? color : undefined} dimColor={!isRunning} size="footnote" weight="medium">{right}</Text>
-                </Box>
-              )
+                ),
+                title: (
+                  <Button key={`itm:${itemKey}`} plain onPress={() => void update($, hubLogStep, () => itemKey)}>
+                    <Text weight="semibold" wrap="truncate-end">{firstLine(it.value) || `item ${i + 1}`}</Text>
+                  </Button>
+                ),
+              })
             }),
           ]),
         )
@@ -1186,29 +1262,22 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const output = (step?.output ?? '').trim()
       const remark = isDecided && output && output !== 'approved' && output !== 'rejected' ? output : ''
       const when = isDecided && step?.endedAt ? ago(step.endedAt, now) : isWaiting && step?.startedAt ? `asked ${ago(step.startedAt, now)}` : ''
-      return (
-        <Box key={`appr:${spec.id}`} flexDirection="column" gap="xs" paddingX={isDesktop ? 1 : 0} paddingY={isDesktop ? 'xs' : 0} backgroundColor={isDesktop ? (isWaiting ? tint(C.dirty, '14') : C.tile) : undefined}>
-          <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
-            <Box flexShrink={1} minWidth={0} overflow="hidden">
-              <Text size="footnote" weight="bold" color={isWaiting ? C.dirty : undefined} dimColor={!isWaiting} wrap="truncate-end">{isWaiting ? `WAITING FOR YOU · ${spec.title.toUpperCase()}` : spec.title.toUpperCase()}</Text>
-            </Box>
-            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
-              {pill(decision.label, decision.color)}
-              {when ? <Text dimColor size="footnote">{when}</Text> : null}
-            </Box>
-          </Box>
-          <Text weight="semibold" dimColor={status === 'pending' || status === 'skipped' || status === 'cancelled'}>{question}</Text>
-          {remark ? <Text dimColor size="footnote">{`Note: ${remark}`}</Text> : null}
-          {isWaiting
-            ? (
-                <Box flexDirection="row" gap={1}>
-                  <Button key={`approve:${spec.id}`} variant="primary" onPress={() => void decideStep($, run.id, spec.id, true)}>Approve</Button>
-                  <Button key={`reject:${spec.id}`} onPress={() => void decideStep($, run.id, spec.id, false)}>Reject</Button>
-                </Box>
-              )
-            : null}
-        </Box>
-      )
+      return tile(`appr:${spec.id}`, {
+        color: decision.color,
+        label: isWaiting ? `waiting for you · ${spec.title}` : `${decision.label} · ${spec.title}`,
+        isLit: isWaiting,
+        right: when ? <Text dimColor size="footnote">{when}</Text> : undefined,
+        title: <Text weight="semibold" dimColor={status === 'pending' || status === 'skipped' || status === 'cancelled'}>{question}</Text>,
+        sub: remark ? `Note: ${remark}` : undefined,
+        body: isWaiting
+          ? (
+              <Box flexDirection="row" gap={1} paddingTop="xs">
+                <Button key={`approve:${spec.id}`} variant="primary" onPress={() => void decideStep($, run.id, spec.id, true)}>Approve</Button>
+                <Button key={`reject:${spec.id}`} onPress={() => void decideStep($, run.id, spec.id, false)}>Reject</Button>
+              </Box>
+            )
+          : undefined,
+      })
     }
 
     async function again(run: Run): Promise<void> {
@@ -1228,32 +1297,26 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const total = loaded.length + catalog.skills.length + catalog.agents.length
       const isLoading = catalog.at === 0
       const use = (text: string) => () => fillPrompt(text)
-      const group = (title: string, color: string, label: string, items: { key: string; name: string; description: string; onPress: () => void }[], wait = false) =>
+      const group = (title: string, color: string, kind: string, label: string, items: { key: string; name: string; description: string; onPress: () => void }[], wait = false) =>
         card(`group:${title}`, [
           heading(title, wait ? '' : String(items.length)),
           ...(items.length
-            ? items.map(it => (
-                <Box key={`row:${it.key}`} flexDirection="row" justifyContent="space-between" alignItems="center" gap={1} paddingX={isDesktop ? 1 : 0} paddingY={isDesktop ? 'xs' : 0} backgroundColor={isDesktop ? C.tile : undefined}>
-                  <Box flexDirection="column" flexShrink={1} minWidth={0} overflow="hidden">
-                    <Text weight="semibold" wrap="truncate-end">{it.name}</Text>
-                    {it.description ? <Text dimColor size="footnote" wrap="truncate-end">{it.description}</Text> : null}
-                  </Box>
-                  {isDesktop
-                    ? (
-                        <Button key={`use:${it.key}`} plain onPress={it.onPress}>
-                          <Text color={color} backgroundColor={tint(color)} weight="semibold">{` ${label} `}</Text>
-                        </Button>
-                      )
-                    : <Button key={`use:${it.key}`} onPress={it.onPress}>{label}</Button>}
-                </Box>
-              ))
+            ? items.map(it =>
+                tile(`row:${it.key}`, {
+                  color,
+                  label: kind,
+                  right: isDesktop ? <Button key={`use:${it.key}`} plain onPress={it.onPress}>{label}</Button> : <Button key={`use:${it.key}`} onPress={it.onPress}>{label}</Button>,
+                  title: <Text weight="semibold" wrap="truncate-end">{it.name}</Text>,
+                  sub: it.description,
+                }),
+              )
             : [<Text dimColor size="footnote">{wait ? 'Looking…' : 'None found'}</Text>]),
         ])
       return [
         heading('Everything Claude can use', isLoading ? '' : String(total)),
-        group('Workflows', C.blue, 'Open', loaded.map(f => ({ key: `wf:${f.id}`, name: f.workflow.title, description: firstSentence(f.workflow.description), onPress: () => void showWorkflow($, f.id) }))),
-        group('Skills', C.add, 'Use', catalog.skills.map(s => ({ key: `skill:${s.name}`, name: s.name, description: s.description, onPress: use(s.fill) })), isLoading),
-        group('Agents', C.read, 'Use', catalog.agents.map(a => ({ key: `agent:${a.name}`, name: a.name, description: a.description, onPress: use(a.fill) })), isLoading),
+        group('Workflows', C.blue, 'workflow', 'Open', loaded.map(f => ({ key: `wf:${f.id}`, name: f.workflow.title, description: firstSentence(f.workflow.description), onPress: () => void showWorkflow($, f.id) }))),
+        group('Skills', C.add, 'skill', 'Use', catalog.skills.map(s => ({ key: `skill:${s.name}`, name: s.name, description: s.description, onPress: use(s.fill) })), isLoading),
+        group('Agents', C.read, 'agent', 'Use', catalog.agents.map(a => ({ key: `agent:${a.name}`, name: a.name, description: a.description, onPress: use(a.fill) })), isLoading),
       ]
     }
   })

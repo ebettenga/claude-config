@@ -523,7 +523,7 @@ for (const surface of SURFACES) {
     expect(await ui.find({ type: 'Button', key: 'approve:ok' })).toBeTruthy()
     expect(await ui.find({ type: 'Button', key: 'reject:ok' })).toBeTruthy()
     expect(all).toContain('FINAL CHECK')
-    expect(all).toMatch(/not reached/)
+    expect(all).toMatch(/not reached/i)
     expect(await ui.find({ type: 'Text', text: /^Ship it\?$/ })).toBeTruthy()
     expect(await ui.find({ type: 'Button', key: 'approve:final' })).toBeFalsy()
 
@@ -572,7 +572,7 @@ for (const surface of SURFACES) {
     await $.tool.call({ tool: 'mcp__flow__decide_step', run: id, step: 'ok', ok: true, output: 'Looks right' } as never)
     await w.clock.settle()
     all = await texts(ui)
-    expect(all).toMatch(/approved/)
+    expect(all).toMatch(/approved/i)
     expect(all).toContain('Note: Looks right')
     expect(all).toContain('WAITING FOR YOU · FINAL CHECK')
     await ui.press({ key: 'approve:final' })
@@ -581,7 +581,7 @@ for (const surface of SURFACES) {
     expect(await ui.find({ type: 'Button', key: 'approve:final' })).toBeFalsy()
     all = await texts(ui)
     expect(all).not.toContain('WAITING FOR YOU')
-    expect(all).not.toMatch(/not reached/)
+    expect(all).not.toMatch(/not reached/i)
     await ui.unmount()
   })
 
