@@ -92,7 +92,9 @@ It copies the portable parts of `~/.claude/settings.json` (plugins, marketplaces
 
 `plugins/flow/` is how big tasks get done. `/flow:flow <task>` starts an orchestrator that plans, owns the design, hands the work to tiered workers (`flow-fable`, `flow-heavy`, `flow-careful`, `flow-medium`, `flow-light`) and reviews what they send back. You rarely need to type it: flow starts itself for substantial multi-file work. `/flow-agents` opens a progress bar for the running workers.
 
-It also runs workflows: YAML files (`flow.yaml`) that mix scripts and Claude steps, seen and run from `/flow-chart`. They live in `~/Documents/flows`, a separate repo (set by the plugin's `workflowsDir` option); a project's own `.flows/` folder is read too.
+It also runs workflows: YAML files (`flow.yaml`) that mix scripts and Claude steps, seen and run from `/flow-chart`. They live in `~/Documents/flows`, the private repo [ebettenga/flows](https://github.com/ebettenga/flows), which `install.sh` clones there (the plugin's `workflowsDir` option can point elsewhere); a project's own `.flows/` folder is read too.
+
+Agent steps in a workflow run a headless Claude (`claude -p --restricted`) with only the tools, folders and budget the step lists, so they work in auto mode without asking. That `claude` needs its own sign-in once per machine: `claude auth login`.
 
 ## Layout
 

@@ -18,6 +18,12 @@ if [ ! -d "$PLAYGROUND" ]; then
   git clone --depth 1 https://github.com/anthropics/claude-code-playground "$PLAYGROUND"
 fi
 
+# flow's workflows: their own private repo, where the flow plugin looks by default.
+FLOWS="$HOME/Documents/flows"
+if [ ! -d "$FLOWS" ]; then
+  git clone https://github.com/ebettenga/flows "$FLOWS" || echo "Could not clone ebettenga/flows (private): sign in with gh, then run this again."
+fi
+
 # 2. Settings: merge the repo's into ~/.claude/settings.json. The repo wins on
 #    plugins, marketplaces and plugin options; other keys on this machine stay.
 [ -f "$CLAUDE/settings.json" ] && cp "$CLAUDE/settings.json" "$CLAUDE/backups/settings.json.$STAMP"
