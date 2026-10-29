@@ -840,3 +840,34 @@ detail:
     await ui.unmount()
   })
 }
+
+for (const surface of SURFACES) {
+  test(`the Runs tab groups runs by workflow; the latest group is open, the rest fold (${surface})`, async ($, on) => {
+    const now = new Date(2026, 9, 28, 12, 0, 0).getTime()
+    const run = (wf: string, title: string, id: string, status: string, minsAgo: number) => [
+      `${RUNS}/${wf}/${id}/run.json`,
+      JSON.stringify({ id, workflowId: wf, title, workflowDir: `${FLOWS}/${wf}`, dir: `${RUNS}/${wf}/${id}`, inputs: {}, status, startedAt: now - minsAgo * 60_000, endedAt: now - minsAgo * 60_000 + 1000, steps: [] }),
+    ]
+    world(on, Object.fromEntries([
+      run('csv', 'CSV summary', '20261028-115000-aaaa', 'done', 10),
+      run('csv', 'CSV summary', '20261028-110000-bbbb', 'failed', 60),
+      run('reports', 'Weekly reports', '20261027-090000-cccc', 'done', 60 * 27),
+    ]))
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'tab:runs' })
+    // CSV ran last: its group is open, with both runs; Weekly reports is folded.
+    expect(await ui.find({ type: 'Text', text: /▾ CSV summary/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /▸ Weekly reports/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'open:20261028-115000-aaaa' })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'open:20261028-110000-bbbb' })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'open:20261027-090000-cccc' })).toBeFalsy()
+    expect(await ui.find({ type: 'Text', text: /1 failed/ })).toBeTruthy()
+    // Fold one open and the other shut.
+    await ui.press({ key: 'fold:runs:reports' })
+    expect(await ui.find({ type: 'Button', key: 'open:20261027-090000-cccc' })).toBeTruthy()
+    await ui.press({ key: 'fold:runs:csv' })
+    expect(await ui.find({ type: 'Button', key: 'open:20261028-115000-aaaa' })).toBeFalsy()
+    await ui.unmount()
+  })
+}

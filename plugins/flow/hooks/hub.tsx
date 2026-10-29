@@ -1448,37 +1448,74 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
 
     function runsList(): RenderChildren[] {
       if (!runs.length) return [<Text dimColor>No runs yet. Open a workflow and press Run.</Text>]
+      // One group per workflow, the one run most recently first; runs newest first inside.
+      const groups = new Map<string, Run[]>()
+      for (const r of [...runs].sort((a, b) => b.startedAt - a.startedAt)) groups.set(r.workflowId, [...(groups.get(r.workflowId) ?? []), r])
+      const ordered = [...groups.entries()]
       return [
-        heading('Runs', String(runs.length)),
-        <Box flexDirection="column" gap="xs">
-          {runs.map(r => {
-            const color = RUN_COLOR[r.status]
-            const p = progressOf(r)
-            return tile(`runrow:${r.id}`, {
-              color,
-              label: r.status === 'running' ? `running${['...', '.  ', '.. ', '...'][frame % 4]}` : r.status,
-              isLit: r.status === 'running' || r.status === 'waiting',
-              right: <Text dimColor size="footnote" tabular>{duration((r.endedAt ?? now) - r.startedAt)}</Text>,
-              title: (
-                <Button key={`open:${r.id}`} plain onPress={() => void showRun($, r.id)}>
-                  <Text weight="semibold" wrap="truncate-end">{r.title}</Text>
-                </Button>
-              ),
-              sub: [`started ${ago(r.startedAt, now)}`, `${p.settled} of ${p.total} steps`, r.parent ? 'child run' : ''].filter(Boolean).join(' · '),
-              body: (
-                <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
-                  <Box flexShrink={1} minWidth={0} overflow="hidden">
-                    <Text size="footnote" color={r.status === 'failed' || r.status === 'waiting' ? color : undefined} dimColor={r.status !== 'failed' && r.status !== 'waiting'} wrap="truncate-end">{runOutcome(r)}</Text>
-                  </Box>
-                  <Text size="footnote">
-                    {r.steps.map(s => <Text key={`m:${r.id}:${s.id}`} color={s.status === 'running' ? color : MARK[s.status].color}>{MARK[s.status].glyph}</Text>)}
-                  </Text>
-                </Box>
-              ),
-            })
-          })}
-        </Box>,
+        heading('Runs', `${runs.length} · ${plural(ordered.length, 'workflow')}`),
+        ...ordered.map(([wfId, list], gi) => runGroup(wfId, list, gi)),
       ]
+    }
+
+    /** A workflow's runs under a title line that folds them; open by default while one runs, or for the latest workflow. */
+    function runGroup(wfId: string, list: Run[], index: number) {
+      const foldKey = `runs:${wfId}`
+      const isBusy = list.some(r => r.status === 'running' || r.status === 'waiting')
+      const isFolded = folded[foldKey] ?? !(isBusy || index === 0)
+      const counts = (['running', 'waiting', 'failed', 'cancelled', 'interrupted', 'done'] as const)
+        .map(st => [st, list.filter(r => r.status === st).length] as const)
+        .filter(([, n]) => n > 0)
+      const latest = list[0] as Run
+      const head = (
+        <Box key={`rg:${wfId}`} flexDirection="row" alignItems="center" gap={1} paddingTop={index ? 'sm' : 0}>
+          <Button key={`fold:${foldKey}`} plain label={`${isFolded ? 'Show' : 'Hide'} ${latest.title} runs`} onPress={() => void update($, hubFolded, all => ({ ...all, [foldKey]: !isFolded }))}>
+            <Text weight="bold" size={isDesktop ? 'heading' : undefined}>{`${isFolded ? '▸ ' : '▾ '}${latest.title}`}</Text>
+          </Button>
+          <Text dimColor size="footnote">{String(list.length)}</Text>
+          <Box flexGrow={1} />
+          <Text size="footnote">
+            {counts.map(([st, n], i) => (
+              <Text key={`rgc:${wfId}:${st}`} color={RUN_COLOR[st]}>{`${i ? ' · ' : ''}${n} ${st}`}</Text>
+            ))}
+          </Text>
+          <Text dimColor size="footnote">{ago(latest.startedAt, now)}</Text>
+        </Box>
+      )
+      if (isFolded) return head
+      return (
+        <Box key={`rgb:${wfId}`} flexDirection="column" gap="xs">
+          {head}
+          {list.map(runRow)}
+        </Box>
+      )
+    }
+
+    function runRow(r: Run) {
+      const color = RUN_COLOR[r.status]
+      const p = progressOf(r)
+      return tile(`runrow:${r.id}`, {
+        color,
+        label: r.status === 'running' ? `running${['...', '.  ', '.. ', '...'][frame % 4]}` : r.status,
+        isLit: r.status === 'running' || r.status === 'waiting',
+        right: <Text dimColor size="footnote" tabular>{duration((r.endedAt ?? now) - r.startedAt)}</Text>,
+        title: (
+          <Button key={`open:${r.id}`} plain onPress={() => void showRun($, r.id)}>
+            <Text weight="semibold" wrap="truncate-end">{r.title}</Text>
+          </Button>
+        ),
+        sub: [`started ${ago(r.startedAt, now)}`, `${p.settled} of ${p.total} steps`, r.parent ? 'child run' : ''].filter(Boolean).join(' · '),
+        body: (
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+            <Box flexShrink={1} minWidth={0} overflow="hidden">
+              <Text size="footnote" color={r.status === 'failed' || r.status === 'waiting' ? color : undefined} dimColor={r.status !== 'failed' && r.status !== 'waiting'} wrap="truncate-end">{runOutcome(r)}</Text>
+            </Box>
+            <Text size="footnote">
+              {r.steps.map(s => <Text key={`m:${r.id}:${s.id}`} color={s.status === 'running' ? color : MARK[s.status].color}>{MARK[s.status].glyph}</Text>)}
+            </Text>
+          </Box>
+        ),
+      })
     }
 
     /** One line on how a run went: where it stopped and why, or what it is doing. */
