@@ -247,6 +247,46 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
+  test(`flows.yaml groups and orders the workflows; Arrange changes and saves it (${surface})`, async ($, on) => {
+    const w = world(on, {
+      [`${FLOWS}/reports/flow.yaml`]: REPORTS,
+      [`${FLOWS}/csv/flow.yaml`]: CSV,
+      [`${FLOWS}/each/flow.yaml`]: EACH,
+      [`${FLOWS}/flows.yaml`]: 'groups:\n  - title: Data\n    workflows: [csv, reports]\n',
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const order = async () => {
+      const all = await texts(ui)
+      return ['Data', 'CSV summary', 'Weekly client reports', 'Other'].map(t => all.indexOf(t))
+    }
+    const [data, csv, reports, other] = await order()
+    expect(data).toBeGreaterThanOrEqual(0)
+    expect(data < csv && csv < reports && reports < other).toBe(true)
+
+    // Fold a group shut.
+    await ui.press({ key: 'fold:Data' })
+    expect(await ui.find({ type: 'Text', text: /^CSV summary$/ })).toBeFalsy()
+    await ui.press({ key: 'fold:Data' })
+
+    // Arrange: move reports up, then make a group and put the third workflow in it.
+    await ui.press({ key: 'arrange' })
+    expect(await ui.find({ type: 'Button', key: 'run:csv' })).toBeFalsy()
+    await ui.press({ key: 'wup:reports' })
+    await w.clock.settle()
+    expect(w.fs.get(`${FLOWS}/flows.yaml`)).toMatch(/workflows: \[reports, csv\]/)
+    await ui.input({ key: 'new-group-name', text: 'Batch', kind: 'submit' })
+    await w.clock.settle()
+    expect(w.fs.get(`${FLOWS}/flows.yaml`)).toMatch(/title: Batch/)
+    await ui.press({ key: 'gup:Batch' })
+    await w.clock.settle()
+    const text = w.fs.get(`${FLOWS}/flows.yaml`) ?? ''
+    expect(text.indexOf('Batch')).toBeLessThan(text.indexOf('Data'))
+    await ui.press({ key: 'arrange' })
+    expect(await ui.find({ type: 'Button', key: 'run:csv' })).toBeTruthy()
+    await ui.unmount()
+  })
+
   test(`a file input: browse, enter a folder, pick a file (${surface})`, async ($, on) => {
     world(on, {
       [`${FLOWS}/reports/flow.yaml`]: REPORTS,

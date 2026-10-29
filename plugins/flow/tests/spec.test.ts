@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
+import { addGroup, arrange, moveGroup, moveWorkflow, parseLayout, removeGroup, renameGroup, setGroup } from '../hooks/layout'
 import { checksStatus, defaultValue, evalCondition, fill, inputProblems, isAIStep, parseCondition, parseWorkflow, shQuote, splitArgs, stepEnvNames, stepLevels, untilTime } from '../hooks/spec'
 import type { ConditionScope } from '../hooks/spec'
 import type { InputSpec, Workflow } from '../types'
@@ -655,4 +656,35 @@ test('loader: an agent step takes tools, read, write and budget, and never Bash'
   expect(bad.errors.join('\n')).toContain('Bash is not allowed in an agent step')
   expect(bad.errors.join('\n')).toContain('budget: must be dollars')
   expect(bad.errors.join('\n')).toContain('steps[1].tools: only agent steps take tools:')
+})
+
+test('flows.yaml: groups in order, Other for the rest, and each problem named', () => {
+  const ok = parseLayout('groups:\n  - title: Reports\n    workflows: [b, a]\n  - title: Empty\n')
+  expect(ok.errors).toEqual([])
+  const found = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+  expect(arrange(found, ok.groups).map(s => [s.title, s.items.map(f => f.id)])).toEqual([['Reports', ['b', 'a']], ['Empty', []], ['Other', ['c']]])
+  const bad = parseLayout('groups:\n  - title: Other\n  - title: X\n    workflows: [a]\n  - title: Y\n    workflows: [a]\nextra: 1\n')
+  expect(bad.errors.join('\n')).toContain('"Other" is kept')
+  expect(bad.errors.join('\n')).toContain('"a" is already in X')
+  expect(bad.errors.join('\n')).toContain('flows.yaml.extra: is not a field')
+  expect(parseLayout('').groups).toEqual([])
+})
+
+test('flows.yaml edits: move, regroup, add, rename, reorder and remove', () => {
+  let g = [{ title: 'A', workflows: ['x', 'gone', 'y'] }]
+  // Moving among what is shown keeps the id of a workflow missing here.
+  g = moveWorkflow(g, 'y', ['x', 'y'], -1)
+  expect(g[0]?.workflows).toEqual(['y', 'gone', 'x'])
+  g = addGroup(g, 'B')
+  expect(addGroup(g, 'Other')).toEqual(g)
+  g = setGroup(g, 'x', 'B')
+  expect(g).toEqual([{ title: 'A', workflows: ['y', 'gone'] }, { title: 'B', workflows: ['x'] }])
+  g = moveGroup(g, 'B', -1)
+  expect(g.map(x => x.title)).toEqual(['B', 'A'])
+  g = renameGroup(g, 'B', 'Bee')
+  expect(renameGroup(g, 'Bee', 'A')).toEqual(g)
+  g = setGroup(g, 'y', 'Other')
+  expect(g[1]?.workflows).toEqual(['gone'])
+  g = removeGroup(g, 'Bee')
+  expect(g.map(x => x.title)).toEqual(['A'])
 })

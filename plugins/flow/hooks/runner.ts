@@ -6,7 +6,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessSpawnResult, Register, Timer, TurnCompleteInput } from 'claude-code'
 
-import type { Found, ItemRun, Run, RunStatus, StepRun, StepSpec, StepStatus, Tier, Workflow } from '../types'
+import type { Found, ItemRun, Layout, LayoutGroup, Run, RunStatus, StepRun, StepSpec, StepStatus, Tier, Workflow } from '../types'
+import { LAYOUT_FILE, layoutYaml, parseLayout } from './layout'
 import {
   WORK_KINDS,
   checksStatus,
@@ -28,6 +29,8 @@ import type { ConditionScope, TemplateContext } from './spec'
 import { hubRunStarted, hubSessionStart, hubTick } from './hub-state'
 
 export const workflowsAtom = atom({ plugin: 'flow', key: 'workflows' } as const, [], { shape: 'workflows-1' })
+/** The flows folder's flows.yaml: how the Workflows page groups and orders them. */
+export const layoutAtom = atom({ plugin: 'flow', key: 'layout' } as const, { groups: [], errors: [] } as Layout, { shape: 'layout-1' })
 export const runsAtom = atom({ plugin: 'flow', key: 'runs' } as const, [], { shape: 'runs-1' })
 
 const MAX_RUNS = 30
@@ -129,7 +132,17 @@ export async function refreshWorkflows($: $): Promise<Found[]> {
     }
   }
   await update($, workflowsAtom, () => found)
+  const layoutFile = `${base}/${LAYOUT_FILE}`
+  const text = (await $.fs.exists(layoutFile).catch(() => false)) ? await $.fs.read(layoutFile).catch(() => '') : ''
+  await update($, layoutAtom, () => ({ ...parseLayout(text), file: layoutFile }))
   return found
+}
+
+/** Writes the groups to flows.yaml in the flows folder, then reads everything again. */
+export async function saveLayout($: $, groups: LayoutGroup[]): Promise<void> {
+  const base = expand(workflowsDir, await home($)).replace(/\/+$/, '')
+  await $.fs.write(`${base}/${LAYOUT_FILE}`, layoutYaml(groups))
+  await refreshWorkflows($)
 }
 
 // ---------------------------------------------------------------------------

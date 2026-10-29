@@ -352,6 +352,18 @@ declare module 'claude-code' {
       hubAttempts: Shaped<HubAttempts>
       /** By run id: the Results blocks shown collapsed (absent: all but the first two open). */
       hubOpenResults: Shaped<HubOpenResults>
+      /** flows.yaml: the Workflows page's groups and their order. */
+      layout: Shaped<Layout>
+      /** The Workflows page in Arrange mode. */
+      hubArrange: Shaped<boolean>
+      /** Groups folded shut on the Workflows page, by title. */
+      hubFolded: Shaped<Record<string, boolean>>
     }
   }
 }
+
+/** One group of flows.yaml: its title and its workflows' ids, in order. */
+export type LayoutGroup = { title: string; workflows: string[] }
+
+/** flows.yaml, read: the groups and what in it is wrong. */
+export type Layout = { groups: LayoutGroup[]; errors: string[]; file?: string }

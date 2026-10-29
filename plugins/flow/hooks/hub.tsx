@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { ChartData, Found, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Run, StepRun, StepSpec, Workflow } from '../types'
+import type { ChartData, Found, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, Workflow } from '../types'
 import { LOGO_TEXT_PARTS, logoSvg } from './brand'
 import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
 import type { Table } from './charts'
@@ -52,7 +52,9 @@ import {
 } from './hub-parts'
 import { checkEnv, openHub, showRun, showWorkflow } from './hub-state'
 import { SVG } from './icons'
-import { cancelRun, decideStep, refreshWorkflows, rerun, resumeRun, startRun } from './runner'
+import { cancelRun, decideStep, refreshWorkflows, rerun, resumeRun, saveLayout, startRun } from './runner'
+import { OTHER, addGroup, arrange, moveGroup, moveWorkflow, removeGroup, renameGroup, setGroup } from './layout'
+import type { Section } from './layout'
 import { STEP_KINDS, defaultValue, fill, inputProblems, isAIStep, stepLevels } from './spec'
 
 type $ = EngineInterface
@@ -82,6 +84,11 @@ const hubCatalog = atom({ plugin: 'flow', key: 'hubCatalog' } as const, EMPTY_CA
 const hubEnv = atom({ plugin: 'flow', key: 'hubEnv' } as const, {} as HubEnv, { shape: 'hub-env-1' })
 const hubAttempts = atom({ plugin: 'flow', key: 'hubAttempts' } as const, {} as HubAttempts, { shape: 'hub-attempts-1' })
 const hubOpenResults = atom({ plugin: 'flow', key: 'hubOpenResults' } as const, {} as HubOpenResults, { shape: 'hub-open-results-1' })
+const layoutAtom = atom({ plugin: 'flow', key: 'layout' } as const, { groups: [], errors: [] } as Layout, { shape: 'layout-1' })
+/** The Workflows page in Arrange mode: groups and order can be changed. */
+const hubArrange = atom({ plugin: 'flow', key: 'hubArrange' } as const, false, { shape: 'hub-arrange-1' })
+/** Groups folded shut on the Workflows page, by title (this viewer's, not saved to flows.yaml). */
+const hubFolded = atom({ plugin: 'flow', key: 'hubFolded' } as const, {} as Record<string, boolean>, { shape: 'hub-folded-1' })
 
 // Module scope is fine here: registerHub sets these again on every (re)load.
 let workflowsDir = '~/Documents/flows'
@@ -171,7 +178,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     const width = Math.max(30, e.props.bodyColumns ?? 60)
     // The body in pixels, as progress.tsx reckons it; a card's inside is ~40 px less.
     const px = Math.max(160, Math.min(900, width * 8 - 8))
-    const [found, runs, tab, wfId, runId, forms, picked, q, logKey, frame, catalog, env, attempts, openResults] = await Promise.all([
+    const [found, runs, tab, wfId, runId, forms, picked, q, logKey, frame, catalog, env, attempts, openResults, layout, isArranging, folded] = await Promise.all([
       read($, workflowsAtom),
       read($, runsAtom),
       read($, hubTab),
@@ -186,6 +193,9 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       read($, hubEnv),
       read($, hubAttempts),
       read($, hubOpenResults),
+      read($, layoutAtom),
+      read($, hubArrange),
+      read($, hubFolded),
     ])
     const now = await $.clock.now()
     const cwd = await $.session.cwd().catch(() => '')
@@ -412,10 +422,42 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           {q ? <Button key="hub-q-clear" plain onPress={() => void update($, hubQuery, () => '')}>✕</Button> : null}
         </Box>
       ) : null
+      const arrangeButton = needle
+        ? null
+        : (
+            isArranging
+              ? <Button key="arrange" variant="primary" onPress={() => void update($, hubArrange, v => !v)}>Done</Button>
+              : <Button key="arrange" plain onPress={() => void update($, hubArrange, v => !v)}>Arrange</Button>
+          )
+      const head = (
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>{heading('Workflows', `${loaded.length} · ${workflowsDir}`)}</Box>
+          {arrangeButton}
+        </Box>
+      )
+      const problems = layout.errors.length
+        ? card('layout-errors', [
+            <Text size="footnote" weight="bold" color={C.del}>{`FLOWS.YAML HAS ${plural(layout.errors.length, 'PROBLEM')}`}</Text>,
+            ...layout.errors.map((err, i) => <Text key={`lerr:${i}`} color={C.del} size="footnote">{err}</Text>),
+          ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
+        : null
+      const sections = needle ? [{ title: '', isOther: true, items: shown }] : arrange(shown, layout.groups)
+      const hasGroups = layout.groups.length > 0
+      const body: RenderChildren[] = []
+      for (const [si, sec] of sections.entries()) {
+        // Without any groups the page is one list, as before, until a group is made.
+        if (!needle && (hasGroups || isArranging)) body.push(groupHead(sec, si, sections.filter(x => !x.isOther).length))
+        const isFolded = !needle && !isArranging && folded[sec.title] === true
+        if (!isFolded) body.push(...sec.items.map((f, i) => workflowCard(f, isArranging && !needle ? { sec, index: i } : undefined)))
+        if (!isFolded && !sec.items.length && (hasGroups || isArranging))
+          body.push(<Text key={`empty:${sec.title}`} dimColor size="footnote">{sec.isOther ? 'Every workflow is in a group.' : 'No workflows yet: put one here with its group menu.'}</Text>)
+      }
       return [
         search,
-        heading('Workflows', `${loaded.length} · ${workflowsDir}`),
-        ...shown.map(workflowCard),
+        head,
+        problems,
+        ...body,
+        isArranging && !needle ? newGroupRow() : null,
         shown.length
           ? null
           : <Text dimColor>{needle ? `No workflow matches “${q.trim()}”` : `No workflows yet: add a folder with a flow.yaml to ${workflowsDir}.`}</Text>,
@@ -426,6 +468,72 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
             ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
           : null,
       ]
+    }
+
+    // ── groups (flows.yaml) ──
+
+    function edit(change: (groups: LayoutGroup[]) => LayoutGroup[]) {
+      void saveLayout($, change(layout.groups)).catch(() => undefined)
+    }
+
+    /** A group's title line: fold it open or shut; in Arrange mode rename, move or remove it. */
+    function groupHead(sec: Section<Found & { workflow: Workflow }>, index: number, groupCount: number) {
+      const isFolded = folded[sec.title] === true
+      const count = String(sec.items.length)
+      if (!isArranging || sec.isOther)
+        return (
+          <Box key={`group:${sec.title}`} flexDirection="row" alignItems="center" gap={1} paddingTop={index ? 'sm' : 0}>
+            <Button key={`fold:${sec.title}`} plain onPress={() => void update($, hubFolded, all => ({ ...all, [sec.title]: !isFolded }))}>
+              <Text weight="bold" size={isDesktop ? 'heading' : undefined}>{`${isArranging ? '' : isFolded ? '▸ ' : '▾ '}${sec.title}`}</Text>
+            </Button>
+            <Text dimColor size="footnote">{count}</Text>
+          </Box>
+        )
+      return (
+        <Box key={`group:${sec.title}`} flexDirection="row" alignItems="center" gap={1} paddingTop={index ? 'sm' : 0}>
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>
+            {Input
+              ? <Input key={`gname:${sec.title}`} value={sec.title} placeholder="Group name" onSubmit={(v: string) => edit(g => renameGroup(g, sec.title, v))} />
+              : <Text bold>{sec.title}</Text>}
+          </Box>
+          <Text dimColor size="footnote">{count}</Text>
+          <Button key={`gup:${sec.title}`} plain onPress={() => edit(g => moveGroup(g, sec.title, -1))} disabled={index === 0}>↑</Button>
+          <Button key={`gdown:${sec.title}`} plain onPress={() => edit(g => moveGroup(g, sec.title, 1))} disabled={index >= groupCount - 1}>↓</Button>
+          <Button key={`gdel:${sec.title}`} plain onPress={() => edit(g => removeGroup(g, sec.title))}>Remove</Button>
+        </Box>
+      )
+    }
+
+    function newGroupRow() {
+      if (!Input) return null
+      return (
+        <Box key="new-group" flexDirection="row" alignItems="center" gap={1}>
+          <Text dimColor>+</Text>
+          <Box flexGrow={1}>
+            <Input key="new-group-name" value="" placeholder="New group: type a name, press Enter" onSubmit={(v: string) => edit(g => addGroup(g, v))} />
+          </Box>
+        </Box>
+      )
+    }
+
+    /** A card's controls in Arrange mode: up and down within its group, and which group it is in. */
+    function arrangeControls(f: Found & { workflow: Workflow }, at: { sec: Section<Found & { workflow: Workflow }>; index: number }) {
+      const ids = at.sec.items.map(x => x.id)
+      const titles = [...layout.groups.map(g => g.title), OTHER]
+      const choose = (v: string) => edit(g => setGroup(g, f.id, v))
+      return (
+        <Box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+          {!at.sec.isOther
+            ? [
+                <Button key={`wup:${f.id}`} plain onPress={() => edit(g => moveWorkflow(g, f.id, ids, -1))} disabled={at.index === 0}>↑</Button>,
+                <Button key={`wdown:${f.id}`} plain onPress={() => edit(g => moveWorkflow(g, f.id, ids, 1))} disabled={at.index >= ids.length - 1}>↓</Button>,
+              ]
+            : null}
+          {Select && titles.length > 1
+            ? <Select key={`grp:${f.id}`} value={at.sec.title} options={titles.map(t => ({ value: t }))} onSelect={choose} />
+            : titles.filter(t => t !== at.sec.title).map(t => <Button key={`to:${f.id}:${t}`} plain onPress={() => choose(t)}>{`→ ${t}`}</Button>)}
+        </Box>
+      )
     }
 
     function kindChips(wf: Workflow) {
@@ -445,7 +553,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       )
     }
 
-    function workflowCard(f: Found & { workflow: Workflow }) {
+    function workflowCard(f: Found & { workflow: Workflow }, at?: { sec: Section<Found & { workflow: Workflow }>; index: number }) {
       const wf = f.workflow
       const last = lastRunLine(runs, wf.id, now)
       const { fixed, ai } = stepCounts(wf)
@@ -455,7 +563,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           <Box flexShrink={1} minWidth={0} overflow="hidden">
             <Text size="heading" weight="semibold" wrap="truncate-end">{wf.title}</Text>
           </Box>
-          <Button key={`run:${wf.id}`} variant="primary" onPress={() => void showWorkflow($, wf.id)}>Run</Button>
+          {at ? arrangeControls(f, at) : <Button key={`run:${wf.id}`} variant="primary" onPress={() => void showWorkflow($, wf.id)}>Run</Button>}
         </Box>,
         wf.description ? <Text dimColor size="footnote">{clip(wf.description, Math.max(40, (width - 6) * 2))}</Text> : null,
         <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
