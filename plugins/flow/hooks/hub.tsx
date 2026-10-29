@@ -7,6 +7,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { ChartData, Found, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Run, StepRun, StepSpec, Workflow } from '../types'
+import { LOGO_TEXT_PARTS, logoSvg } from './brand'
 import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
 import type { Table } from './charts'
 import { findFolders, findOnMac, pastPicks, recentRunFiles, rememberPick, type SuggestedFile } from './file-finder'
@@ -202,11 +203,40 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     else if (tab === 'runs') body = [tabsRow(), ...runsList()]
     else body = [tabsRow(), ...skillsList()]
 
+    const where =
+      tab === 'workflows'
+        ? openWf ? 'workflow' : plural(loaded.length, 'workflow')
+        : tab === 'runs'
+          ? openRun ? 'run' : active.length ? `${active.length} running` : plural(runs.length, 'run')
+          : 'skills'
+
     return (
       <Box flexDirection="column" gap={gap} width={width}>
+        {brandHeader(where)}
         {body}
       </Box>
     )
+
+    // flow's logo and name over every page, with where you are on the right.
+    function brandHeader(sub: string) {
+      if (!isDesktop)
+        return (
+          <Box flexDirection="row" gap={1}>
+            <Text>{LOGO_TEXT_PARTS.map((d, i) => <Text key={`logo:${i}`} color={d.color}>{d.glyph}</Text>)}</Text>
+            <Text bold>flow</Text>
+            <Box flexGrow={1} />
+            <Text dimColor>{sub}</Text>
+          </Box>
+        )
+      return (
+        <Box flexDirection="row" alignItems="center" gap={1} paddingBottom="xs">
+          {Svg ? <Svg source={logoSvg(28, C.pane)} alt="flow logo" width={28} height={28} /> : null}
+          <Text size="title" weight="bold">flow</Text>
+          <Box flexGrow={1} />
+          <Text dimColor size="footnote" weight="medium">{sub.toUpperCase()}</Text>
+        </Box>
+      )
+    }
 
     // ── atoms of the look ──
 

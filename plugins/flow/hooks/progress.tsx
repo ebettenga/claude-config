@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
+import { LOGO_TEXT_PARTS, logoMark } from './brand'
 
 const flow = atom({ plugin: 'flow', key: 'progressFlow' } as const, null)
 const agents = atom({ plugin: 'flow', key: 'progressAgents' } as const, [])
@@ -237,6 +238,9 @@ const noise = (x: number, y: number): number => {
 // so title, bar, percent and the crab live in one drawing; only the count and
 // the dismiss are Buttons beside it.
 const H = 22
+// The band's logo, and where its title starts after it.
+const LOGO_PX = 18
+const TITLE_X = LOGO_PX + 6
 const BAR_H = 16
 const CRAB_W = 26
 // The crab's drawing grid is 30 units wide, props included.
@@ -274,7 +278,7 @@ const fitText = (s: string, size: number, maxW: number): string => {
 const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
   // The title takes what it needs, up to 40% of the row; the bar takes the rest.
   const title = fitText(f.title, 13, Math.max(60, W * 0.4))
-  const BAR_X = Math.round(16 + textWidth(title, 13) + 12)
+  const BAR_X = Math.round(TITLE_X + textWidth(title, 13) + 12)
   const BAR_W = Math.max(60, W - BAR_X - 46 - CRAB_W)
   const color = f.isFinished ? DONE : ACCENT
   const y0 = (H - BAR_H) / 2
@@ -315,7 +319,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
   const pillX = bx(Math.max(0, Math.min(BAR_W - pillW, fillW - pillW)), pillW)
   const percent = `${Math.round(ratio(f) * 100)}%`
   // `direction="rtl"` puts Hebrew words and numbers in reading order; `start` is then the right edge.
-  const titleAt = rtl ? `x="${W - 16}" direction="rtl" text-anchor="start"` : 'x="16"'
+  const titleAt = rtl ? `x="${W - TITLE_X}" direction="rtl" text-anchor="start"` : `x="${TITLE_X}"`
   const percentAt = rtl ? `x="${CRAB_W + 6}" y="${H / 2 + 4.5}"` : `x="${W - CRAB_W - 6}" y="${H / 2 + 4.5}" text-anchor="end"`
   const crabW = CRAB_BOX * 0.8
 
@@ -330,7 +334,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 @media (prefers-reduced-motion: reduce){.t0,.t1,.t2,.t3{animation:none}}
 </style>
 <defs><clipPath id="c"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath></defs>
-<circle cx="${rtl ? W - 5 : 5}" cy="${H / 2}" r="4" fill="${color}"/>
+${logoMark(rtl ? W - LOGO_PX : 0, (H - LOGO_PX) / 2, LOGO_PX)}
 <text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(title)}</text>
 <g transform="translate(${rx(BAR_X, BAR_W)},${y0})">
 <rect class="k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/>
@@ -686,6 +690,15 @@ ${tile(0, s.cost, '≈' + fmtCost(t.cost))}${tile(1, s.tokens, fmtTokens(t.token
 }
 
 const headerHeight = (title: string): number => (title ? 72 : 44)
+
+// The pane's first line: flow's logo and "flow agents".
+const BRAND_H = 34
+const brandSvg = (W: number): string =>
+  svg(
+    W,
+    BRAND_H,
+    `${logoMark(mx(W, 0, 24), 2, 24)}<text class="t" ${startText(W, 32, 19)} font-family="${FONT}" font-size="16" font-weight="700">flow</text><text class="s" ${startText(W, 32 + textWidth('flow', 16) + 6, 19)} font-family="${FONT}" font-size="13">agents</text>`,
+  )
 
 // The task's own progress when the worker reports steps; a finished run is full.
 const progressOf = (a: AgentRun): number | null => {
@@ -1092,7 +1105,7 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
       }
       const shownDone = p.isDoneCollapsed ? 0 : finished.length
       const lines = 1 + (isEmpty ? 1 : 0) + (running.length > 0 ? 1 : 0) + (finished.length > 0 ? 1 : 0) + (planned.length > 0 ? 1 : 0)
-      const gridH = headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
+      const gridH = BRAND_H + headerHeight(title) + lines * LINE_H + (running.length + shownDone) * 66 + planned.length * 46
       return (
         <Box flexDirection="column">
           {/* The grid sizes the pane; the content is placed over it, as an
@@ -1101,6 +1114,7 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
             <Svg key={`grid-${i}`} source={gridSvg(W, tileH)} alt="dotted grid" width={W} height={tileH} />
           ))}
           <Box flexDirection="column" position="absolute" top={0} left={0} right={0} alignItems={align}>
+            <Svg source={brandSvg(W)} alt="flow agents" width={W} height={BRAND_H} />
             <Svg source={headerSvg(W, title, t)} alt={title ? `${title}: ${summary}` : summary} width={W} height={headerHeight(title)} />
             {toggleCompact}
             {isEmpty && <Text dimColor>{s.empty}</Text>}
@@ -1160,6 +1174,11 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
 
     return (
       <Box flexDirection="column">
+        <Text>
+          {LOGO_TEXT_PARTS.map((d, i) => <Text key={`logo:${i}`} color={d.color}>{d.glyph}</Text>)}
+          <Text bold> flow</Text>
+          <Text dimColor> agents</Text>
+        </Text>
         <Box flexDirection="row" justifyContent="space-between">
           <Text bold wrap="truncate-end">
             {title}

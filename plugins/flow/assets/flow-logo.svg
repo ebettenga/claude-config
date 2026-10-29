@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="64" height="64" viewBox="0 0 64 64">
+  <title>flow</title>
+  <g id="Layer_1" data-name="Layer 1">
+    <path d="M16 14 C16 30 32 22 32 32 C32 42 48 34 48 50" fill="none" stroke="#b794f6" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M16 7 C19.866 7 23 10.134 23 14 C23 17.866 19.866 21 16 21 C12.134 21 9 17.866 9 14 C9 10.134 12.134 7 16 7 Z" fill="#6ea8e8" stroke="#1b1b1b" stroke-width="3" stroke-miterlimit="10"/>
+    <path d="M32 25 C35.866 25 39 28.134 39 32 C39 35.866 35.866 39 32 39 C28.134 39 25 35.866 25 32 C25 28.134 28.134 25 32 25 Z" fill="#4fb3a5" stroke="#1b1b1b" stroke-width="3" stroke-miterlimit="10"/>
+    <path d="M48 43 C51.866 43 55 46.134 55 50 C55 53.866 51.866 57 48 57 C44.134 57 41 53.866 41 50 C41 46.134 44.134 43 48 43 Z" fill="#f0a6ca" stroke="#1b1b1b" stroke-width="3" stroke-miterlimit="10"/>
+  </g>
+</svg>
