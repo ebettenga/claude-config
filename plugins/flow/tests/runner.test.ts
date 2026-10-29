@@ -264,7 +264,7 @@ steps:
   expect(after('--permission-mode')).toBe('dontAsk')
   expect(after('--tools')).toBe('Read,Grep,Glob,Write')
   // Reads anywhere in its folders; writes only under the run folder.
-  expect(after('--allowedTools')).toBe(`Read,Grep,Glob,Write(/${dir}/**)`)
+  expect(after('--allowedTools')).toBe(`Read,Grep,Glob,Edit(/${dir}/**)`)
   expect(argv.slice(argv.indexOf('--add-dir') + 1, argv.indexOf('--add-dir') + 3)).toEqual(['/Users/me/app', dir])
   expect(after('--model')).toBe('opus')
   expect(after('--effort')).toBe('low')

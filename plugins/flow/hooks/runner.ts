@@ -987,9 +987,9 @@ const NOT_SIGNED_IN = 'headless Claude is not signed in on this Mac: run `claude
 
 /** The `claude -p` command line for an agent step (exported for tests). */
 export function agentArgv(o: { prompt: string; tools: string[]; read: string[]; write: string[]; model: string; effort: string; budget: number }): string[] {
-  const rule = (tool: string, dir: string) => `${tool}(/${dir.replace(/\/+$/, '')}/**)`
-  const writing = o.tools.filter(t => t === 'Write' || t === 'Edit')
-  const allowed = [...o.tools.filter(t => !writing.includes(t)), ...writing.flatMap(t => o.write.map(d => rule(t, d)))]
+  // File-writing rules are Edit(...) rules: they cover Write too (a Write(...) rule matches nothing).
+  const isWriting = o.tools.some(t => t === 'Write' || t === 'Edit')
+  const allowed = [...o.tools.filter(t => t !== 'Write' && t !== 'Edit'), ...(isWriting ? o.write.map(d => `Edit(/${d.replace(/\/+$/, '')}/**)`) : [])]
   const dirs = [...new Set([...o.read, ...o.write])]
   return [
     'claude', '-p', o.prompt,
