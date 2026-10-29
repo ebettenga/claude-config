@@ -1491,6 +1491,12 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       )
     }
 
+    /** A run card's press: open the run, and put its id at the cursor in the chat box (what was typed stays). */
+    async function openRunCard(r: Run) {
+      await $.prompt.fill({ text: `${r.id} `, mode: 'insert' }).catch(() => undefined)
+      await showRun($, r.id)
+    }
+
     function runRow(r: Run) {
       const color = RUN_COLOR[r.status]
       const p = progressOf(r)
@@ -1500,7 +1506,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         isLit: r.status === 'running' || r.status === 'waiting',
         right: <Text dimColor size="footnote" tabular>{duration((r.endedAt ?? now) - r.startedAt)}</Text>,
         title: (
-          <Button key={`open:${r.id}`} plain onPress={() => void showRun($, r.id)}>
+          <Button key={`open:${r.id}`} plain label={`Open run ${r.id} and put its id in the chat`} onPress={() => void openRunCard(r)}>
             <Text weight="semibold" wrap="truncate-end">{r.title}</Text>
           </Button>
         ),

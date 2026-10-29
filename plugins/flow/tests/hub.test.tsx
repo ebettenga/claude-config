@@ -848,7 +848,7 @@ for (const surface of SURFACES) {
       `${RUNS}/${wf}/${id}/run.json`,
       JSON.stringify({ id, workflowId: wf, title, workflowDir: `${FLOWS}/${wf}`, dir: `${RUNS}/${wf}/${id}`, inputs: {}, status, startedAt: now - minsAgo * 60_000, endedAt: now - minsAgo * 60_000 + 1000, steps: [] }),
     ]
-    world(on, Object.fromEntries([
+    const w = world(on, Object.fromEntries([
       run('csv', 'CSV summary', '20261028-115000-aaaa', 'done', 10),
       run('csv', 'CSV summary', '20261028-110000-bbbb', 'failed', 60),
       run('reports', 'Weekly reports', '20261027-090000-cccc', 'done', 60 * 27),
@@ -863,6 +863,10 @@ for (const surface of SURFACES) {
     expect(await ui.find({ type: 'Button', key: 'open:20261028-110000-bbbb' })).toBeTruthy()
     expect(await ui.find({ type: 'Button', key: 'open:20261027-090000-cccc' })).toBeFalsy()
     expect(await ui.find({ type: 'Text', text: /1 failed/ })).toBeTruthy()
+    // A card's press puts its run id in the chat and opens the run.
+    await ui.press({ key: 'open:20261028-110000-bbbb' })
+    expect(w.fills.at(-1)).toBe('20261028-110000-bbbb ')
+    await ui.press({ key: 'tab:runs' })
     // Fold one open and the other shut.
     await ui.press({ key: 'fold:runs:reports' })
     expect(await ui.find({ type: 'Button', key: 'open:20261027-090000-cccc' })).toBeTruthy()
