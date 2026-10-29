@@ -20,6 +20,8 @@ type Setup = {
   packages?: string[]
   mcp?: (e: McpCall) => McpResult | Promise<McpResult>
   http?: (e: HttpCall) => HttpResult | Promise<HttpResult>
+  /** Answers git through $.process.run: its exit code and stderr, and files a clone leaves. */
+  git?: (argv: readonly string[]) => { exitCode?: number; stderr?: string; files?: Record<string, string> }
   /** Answers $.model.complete; default: an answer echoing the prompt's first line. */
   model?: (e: { model: string; prompt: string; maxTokens?: number }) => unknown
 }
@@ -54,6 +56,11 @@ function world(on: On, setup: Setup = {}) {
   const runs: (readonly string[])[] = []
   on('process.run', (_, e) => {
     runs.push(e.argv)
+    if (e.argv[0] === 'git') {
+      const r = setup.git?.(e.argv) ?? {}
+      for (const [k, v] of Object.entries(r.files ?? {})) files.set(k, v)
+      return { value: { exitCode: r.exitCode ?? 0, stdout: '', stderr: r.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
     const [, flag = '', script = '', , name = ''] = e.argv
     let exitCode = name in env ? 0 : 1
     let stdout = ''
@@ -1298,4 +1305,78 @@ steps:
   const run = w.runFile('askfail', id)
   expect(run.steps[0]?.error).toContain('model.files: no file at')
   expect(run.steps[1]).toMatchObject({ status: 'failed', error: 'the API answered with an error (529)' })
+})
+
+// ---------------------------------------------------------------------------
+// sources: other folders of workflows, cloned and pulled from git
+
+const TEAM = `${HOME}/.flow/sources/team`
+const SOURCES = `groups:
+  - title: Mine
+    workflows: [par, mrs]
+sources:
+  - name: team
+    title: Team
+    git: git@gitlab.com:org/flows.git
+`
+
+test('sources: a missing source is cloned once, its workflows load with its name and its groups', async ($, on) => {
+  const w = world(on, {
+    files: { [`${FLOWS}/flows.yaml`]: SOURCES, [`${FLOWS}/par/flow.yaml`]: PARALLEL },
+    git: argv =>
+      argv[1] === 'clone'
+        ? {
+            files: {
+              [`${TEAM}/.git/HEAD`]: 'ref: refs/heads/main',
+              [`${TEAM}/mrs/flow.yaml`]: PARALLEL.replace('Parallel', 'MRs'),
+              [`${TEAM}/dash/flow.yaml`]: PARALLEL.replace('Parallel', 'Dash'),
+              [`${TEAM}/flows.yaml`]: 'groups:\n  - title: Reports\n    workflows: [dash]\n',
+            },
+          }
+        : {},
+  })
+  await begin($)
+  const clones = w.runs.filter(a => a[0] === 'git')
+  expect(clones).toEqual([['git', 'clone', '--quiet', 'git@gitlab.com:org/flows.git', TEAM]])
+  const list = JSON.parse(await call($, 'list_workflows', {})) as { id: string; source?: string }[]
+  expect(list.map(f => [f.id, f.source ?? ''])).toEqual([['par', ''], ['dash', 'team'], ['mrs', 'team']])
+  // Listing again reads the clone; it does not clone again.
+  expect(w.runs.filter(a => a[0] === 'git').length).toBe(1)
+
+  // A source workflow runs from its own folder.
+  const id = await start($, 'mrs')
+  expect(w.runFile('mrs', id).workflowDir).toBe(`${TEAM}/mrs`)
+})
+
+test('sources: pull_sources fast-forwards a clone and names a failure', async ($, on) => {
+  let fail = false
+  const w = world(on, {
+    files: { [`${FLOWS}/flows.yaml`]: SOURCES, [`${TEAM}/.git/HEAD`]: 'x', [`${TEAM}/mrs/flow.yaml`]: PARALLEL },
+    git: () => (fail ? { exitCode: 1, stderr: 'hint: x\nfatal: Not possible to fast-forward, aborting.' } : {}),
+  })
+  await begin($)
+  expect(await call($, 'pull_sources', {})).toBe(`Team: pulled (${TEAM})`)
+  expect(w.runs.filter(a => a[0] === 'git').at(-1)).toEqual(['git', 'pull', '--ff-only', '--quiet'])
+  fail = true
+  expect(await call($, 'pull_sources', {})).toBe(`Team: failed: fatal: Not possible to fast-forward, aborting. (${TEAM})`)
+
+})
+
+test('mcp: a server no Claude Code config sets up refuses the run and points at the source README', async ($, on) => {
+  const wf = 'title: Dash\nsteps:\n  - id: c\n    mcp: { server: team, tool: get_client }\n  - id: g\n    mcp: { server: claude.ai Gmail, tool: send }\n'
+  const w = world(on, {
+    files: {
+      [`${FLOWS}/flows.yaml`]: SOURCES,
+      [`${TEAM}/.git/HEAD`]: 'x',
+      [`${TEAM}/dash/flow.yaml`]: wf,
+      [`${HOME}/.claude.json`]: JSON.stringify({ mcpServers: { other: {} }, projects: {} }),
+    },
+  })
+  await begin($)
+  const refused = (await $.tool.call({ tool: 'mcp__flow__run_workflow', id: 'dash' } as never)) as { result: string }
+  expect(refused.result).toContain(`MCP server "team" is not set up in Claude Code on this Mac (see the setup notes in ${TEAM}/README.md)`)
+  expect(refused.result).not.toContain('Gmail')
+  // Set up in this project's local scope: it starts.
+  w.files.set(`${HOME}/.claude.json`, JSON.stringify({ mcpServers: {}, projects: { '/repo': { mcpServers: { 'team': {} } } } }))
+  await start($, 'dash')
 })

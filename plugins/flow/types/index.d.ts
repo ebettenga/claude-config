@@ -231,6 +231,8 @@ export type Found = {
   file: string
   workflow?: Workflow
   errors: string[]
+  /** The source it came from (its `name` in flows.yaml); none for the flows folder and .flows/. */
+  source?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -370,5 +372,33 @@ declare module 'claude-code' {
 /** One group of flows.yaml: its title and its workflows' ids, in order. */
 export type LayoutGroup = { title: string; workflows: string[] }
 
-/** flows.yaml, read: the groups and what in it is wrong. */
-export type Layout = { groups: LayoutGroup[]; errors: string[]; file?: string }
+/**
+ * One `sources:` entry of flows.yaml: another folder of workflows, usually a
+ * git repo the hub clones and pulls (a team's shared flows).
+ */
+export type Source = {
+  /** kebab-case; the folder under ~/.flow/sources when `path` is not given. */
+  name: string
+  /** shown on the Workflows page; default the name. */
+  title: string
+  /** clone URL; none for a plain folder. */
+  git?: string
+  branch?: string
+  /** where it lives on this Mac (absolute, after ~ is expanded). */
+  path: string
+}
+
+/** A source as the hub last found it. */
+export type SourceState = Source & {
+  /** cloned or found, and how many workflows it holds */
+  isPresent: boolean
+  count: number
+  /** the source's own flows.yaml groups, titled "<source title> · <group>" */
+  groups: LayoutGroup[]
+  /** the last pull: when, and what went wrong if it did */
+  pulledAt?: number
+  error?: string
+}
+
+/** flows.yaml, read: the groups, the sources, and what in it is wrong. */
+export type Layout = { groups: LayoutGroup[]; errors: string[]; file?: string; sources?: SourceState[] }

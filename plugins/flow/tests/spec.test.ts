@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { addGroup, arrange, moveGroup, moveWorkflow, parseLayout, removeGroup, renameGroup, setGroup } from '../hooks/layout'
+import { addGroup, arrange, layoutYaml, moveGroup, moveWorkflow, parseLayout, parseSources, rawSources, removeGroup, renameGroup, setGroup } from '../hooks/layout'
 import { checksStatus, defaultValue, evalCondition, fill, inputProblems, isAIStep, parseCondition, parseWorkflow, shQuote, splitArgs, stepEnvNames, stepLevels, untilTime } from '../hooks/spec'
 import type { ConditionScope } from '../hooks/spec'
 import type { InputSpec, Workflow } from '../types'
@@ -668,6 +668,24 @@ test('flows.yaml: groups in order, Other for the rest, and each problem named', 
   expect(bad.errors.join('\n')).toContain('"a" is already in X')
   expect(bad.errors.join('\n')).toContain('flows.yaml.extra: is not a field')
   expect(parseLayout('').groups).toEqual([])
+})
+
+test('flows.yaml sources: each one read and checked, and kept when the groups are written', () => {
+  const text = 'sources:\n  - name: team\n    title: Team\n    git: git@x:o/flows.git\n  - name: mine\n    path: ~/flows-mine\n  - name: Bad Name\n    git: x\n  - name: none\n'
+  expect(parseLayout(text).errors).toEqual([])
+  const { sources, errors } = parseSources(text, '/home/u')
+  expect(sources).toEqual([
+    { name: 'team', title: 'Team', path: '/home/u/.flow/sources/team', git: 'git@x:o/flows.git' },
+    { name: 'mine', title: 'mine', path: '/home/u/flows-mine' },
+  ])
+  expect(errors).toEqual(['flows.yaml.sources[2].name: must be kebab-case, e.g. team-flows', 'flows.yaml.sources[3]: needs git (a clone URL) or path (a folder)'])
+  const out = layoutYaml([{ title: 'A', workflows: ['x'] }], rawSources(text))
+  expect(parseSources(out, '/home/u').sources.length).toBe(2)
+  expect(parseLayout(out).groups).toEqual([{ title: 'A', workflows: ['x'] }])
+  // A source's groups come after yours, only when not empty; yours win a workflow both list.
+  const found = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+  const sections = arrange(found, [{ title: 'Mine', workflows: ['a'] }], [{ title: 'KH · Reports', workflows: ['a', 'b'] }, { title: 'KH', workflows: [] }])
+  expect(sections.map(s => [s.title, s.items.map(f => f.id), s.isSource ?? false])).toEqual([['Mine', ['a'], false], ['KH · Reports', ['b'], true], ['Other', ['c'], false]])
 })
 
 test('flows.yaml edits: move, regroup, add, rename, reorder and remove', () => {

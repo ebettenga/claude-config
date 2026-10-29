@@ -53,7 +53,7 @@ import {
 import { checkEnv, openHub, showRun, showWorkflow } from './hub-state'
 import { SVG } from './icons'
 import { agentsView } from './progress'
-import { cancelRun, decideStep, refreshWorkflows, rerun, resumeRun, saveLayout, startRun } from './runner'
+import { cancelRun, decideStep, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun } from './runner'
 import { OTHER, addGroup, arrange, moveGroup, moveWorkflow, removeGroup, renameGroup, setGroup } from './layout'
 import type { Section } from './layout'
 import { STEP_KINDS, defaultValue, fill, inputProblems, isAIStep, stepLevels } from './spec'
@@ -456,9 +456,15 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
               ? <Button key="arrange" variant="primary" onPress={() => void update($, hubArrange, v => !v)}>Done</Button>
               : <Button key="arrange" plain onPress={() => void update($, hubArrange, v => !v)}>Arrange</Button>
           )
+      const sources = layout.sources ?? []
+      const where = sources.length ? `${workflowsDir} + ${plural(sources.length, 'source')}` : workflowsDir
+      const pullButton = sources.length
+        ? <Button key="pull" plain onPress={() => void pullSources($).then(lines => $.ui.toast(lines.join(' · '))).catch(() => undefined)}>Pull</Button>
+        : null
       const head = (
         <Box flexDirection="row" alignItems="center" gap={1}>
-          <Box flexGrow={1} flexShrink={1} minWidth={0}>{heading('Workflows', `${loaded.length} · ${workflowsDir}`)}</Box>
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>{heading('Workflows', `${loaded.length} · ${where}`)}</Box>
+          {pullButton}
           {arrangeButton}
         </Box>
       )
@@ -468,12 +474,13 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
             ...layout.errors.map((err, i) => <Text key={`lerr:${i}`} color={C.del} size="footnote">{err}</Text>),
           ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
         : null
-      const sections = needle ? [{ title: '', isOther: true, items: shown }] : arrange(shown, layout.groups)
-      const hasGroups = layout.groups.length > 0
+      const sourceGroups = sources.flatMap(src => src.groups)
+      const sections = needle ? [{ title: '', isOther: true, items: shown }] : arrange(shown, layout.groups, sourceGroups)
+      const hasGroups = layout.groups.length > 0 || sources.length > 0
       const body: RenderChildren[] = []
       for (const [si, sec] of sections.entries()) {
         // Without any groups the page is one list, as before, until a group is made.
-        if (!needle && (hasGroups || isArranging)) body.push(groupHead(sec, si, sections.filter(x => !x.isOther).length))
+        if (!needle && (hasGroups || isArranging)) body.push(groupHead(sec, si, sections.filter(x => !x.isOther && !x.isSource).length))
         const isFolded = !needle && !isArranging && folded[sec.title] === true
         if (!isFolded) body.push(...sec.items.map((f, i) => workflowCard(f, isArranging && !needle ? { sec, index: i } : undefined)))
         if (!isFolded && !sec.items.length && (hasGroups || isArranging))
@@ -507,7 +514,8 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     function groupHead(sec: Section<Found & { workflow: Workflow }>, index: number, groupCount: number) {
       const isFolded = folded[sec.title] === true
       const count = String(sec.items.length)
-      if (!isArranging || sec.isOther)
+      // A source's groups come from its own repo: folded or not, never renamed or moved here.
+      if (!isArranging || sec.isOther || sec.isSource)
         return (
           <Box key={`group:${sec.title}`} flexDirection="row" alignItems="center" gap={1} paddingTop={index ? 'sm' : 0}>
             <Button key={`fold:${sec.title}`} plain onPress={() => void update($, hubFolded, all => ({ ...all, [sec.title]: !isFolded }))}>
@@ -546,18 +554,21 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     /** A card's controls in Arrange mode: up and down within its group, and which group it is in. */
     function arrangeControls(f: Found & { workflow: Workflow }, at: { sec: Section<Found & { workflow: Workflow }>; index: number }) {
       const ids = at.sec.items.map(x => x.id)
-      const titles = [...layout.groups.map(g => g.title), OTHER]
+      // A source's workflow goes back to its source's groups, not Other, when no group of yours holds it.
+      const homeTitle = (layout.sources ?? []).find(src => src.name === f.source)?.title ?? OTHER
+      const titles = [...layout.groups.map(g => g.title), homeTitle]
       const choose = (v: string) => edit(g => setGroup(g, f.id, v))
+      const value = at.sec.isSource ? homeTitle : at.sec.title
       return (
         <Box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
-          {!at.sec.isOther
+          {!at.sec.isOther && !at.sec.isSource
             ? [
                 <Button key={`wup:${f.id}`} plain onPress={() => edit(g => moveWorkflow(g, f.id, ids, -1))} disabled={at.index === 0}>↑</Button>,
                 <Button key={`wdown:${f.id}`} plain onPress={() => edit(g => moveWorkflow(g, f.id, ids, 1))} disabled={at.index >= ids.length - 1}>↓</Button>,
               ]
             : null}
           {Select && titles.length > 1
-            ? <Select key={`grp:${f.id}`} value={at.sec.title} options={titles.map(t => ({ value: t }))} onSelect={choose} />
+            ? <Select key={`grp:${f.id}`} value={value} options={titles.map(t => ({ value: t }))} onSelect={choose} />
             : titles.filter(t => t !== at.sec.title).map(t => <Button key={`to:${f.id}:${t}`} plain onPress={() => choose(t)}>{`→ ${t}`}</Button>)}
         </Box>
       )

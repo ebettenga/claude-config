@@ -9,9 +9,20 @@
 //       workflows: [repo-health-check]
 //
 // Workflows no group lists come last, under "Other", in folder order.
+//
+// It may also list sources: other folders of workflows, usually a team's git
+// repo, cloned to ~/.flow/sources/<name> unless `path` says where.
+//
+//   sources:
+//     - name: team
+//       title: Team
+//       git: git@gitlab.com:example-org/flows.git
+//
+// A source's own flows.yaml groups show after these groups, titled
+// "<source title> · <group>", and the rest of its workflows under its title.
 
 import { dump, load } from './vendor/js-yaml.mjs'
-import type { Found, Layout, LayoutGroup } from '../types'
+import type { Found, Layout, LayoutGroup, Source } from '../types'
 
 export const LAYOUT_FILE = 'flows.yaml'
 export const OTHER = 'Other'
@@ -29,7 +40,7 @@ export function parseLayout(text: string): Layout {
   }
   if (raw === null || raw === undefined) raw = {}
   if (!isObj(raw)) return { groups: [], errors: [`${LAYOUT_FILE}: must be a mapping with groups:`] }
-  for (const k of Object.keys(raw)) if (k !== 'groups') errors.push(`${LAYOUT_FILE}.${k}: is not a field (use groups)`)
+  for (const k of Object.keys(raw)) if (k !== 'groups' && k !== 'sources') errors.push(`${LAYOUT_FILE}.${k}: is not a field (use groups or sources)`)
   const list = raw.groups === undefined || raw.groups === null ? [] : raw.groups
   if (!Array.isArray(list)) return { groups: [], errors: [...errors, `${LAYOUT_FILE}.groups: must be a list`] }
   const groups: LayoutGroup[] = []
@@ -57,23 +68,81 @@ export function parseLayout(text: string): Layout {
   return { groups, errors }
 }
 
-/** The file's text for these groups. */
-export function layoutYaml(groups: LayoutGroup[]): string {
-  const head = '# How /flow-chart groups and orders the workflows. Workflows no group lists come last, under Other.\n'
-  return head + dump({ groups: groups.map(g => ({ title: g.title, workflows: g.workflows })) }, { flowLevel: 3, lineWidth: 120 })
+const NAME_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/
+
+/** flows.yaml's sources, with ~ expanded; each problem named by field. */
+export function parseSources(text: string, homeDir: string): { sources: Source[]; errors: string[] } {
+  let raw: unknown
+  try {
+    raw = text.trim() ? load(text) : {}
+  } catch {
+    return { sources: [], errors: [] } // parseLayout reports a file that does not parse
+  }
+  const list = isObj(raw) ? raw.sources : undefined
+  if (list === undefined || list === null) return { sources: [], errors: [] }
+  if (!Array.isArray(list)) return { sources: [], errors: [`${LAYOUT_FILE}.sources: must be a list`] }
+  const errors: string[] = []
+  const sources: Source[] = []
+  const home = homeDir.replace(/\/+$/, '')
+  const expand = (p: string) => (p === '~' ? home : p.startsWith('~/') ? `${home}${p.slice(1)}` : p).replace(/\/+$/, '')
+  list.forEach((s, i) => {
+    const at = `${LAYOUT_FILE}.sources[${i}]`
+    if (!isObj(s)) return void errors.push(`${at}: must be a mapping with name and git or path`)
+    const name = typeof s.name === 'string' ? s.name.trim() : ''
+    if (!NAME_RE.test(name)) return void errors.push(`${at}.name: must be kebab-case, e.g. team-flows`)
+    if (sources.some(x => x.name === name)) return void errors.push(`${at}.name: "${name}" is used twice`)
+    const git = typeof s.git === 'string' && s.git.trim() ? s.git.trim() : undefined
+    const given = typeof s.path === 'string' && s.path.trim() ? s.path.trim() : undefined
+    if (!git && !given) return void errors.push(`${at}: needs git (a clone URL) or path (a folder)`)
+    const path = expand(given ?? `~/.flow/sources/${name}`)
+    if (!path.startsWith('/')) return void errors.push(`${at}.path: must be absolute or start with ~/`)
+    for (const k of Object.keys(s)) if (!['name', 'title', 'git', 'branch', 'path'].includes(k)) errors.push(`${at}.${k}: is not a field`)
+    const title = typeof s.title === 'string' && s.title.trim() ? s.title.trim() : name
+    const branch = typeof s.branch === 'string' && s.branch.trim() ? s.branch.trim() : undefined
+    sources.push({ name, title, path, ...(git ? { git } : {}), ...(branch ? { branch } : {}) })
+  })
+  return { sources, errors }
 }
 
-export type Section<F> = { title: string; isOther: boolean; items: F[] }
+/** The file's text for these groups; `sources` (as the file had them) are kept as they were. */
+export function layoutYaml(groups: LayoutGroup[], sources?: unknown): string {
+  const head = '# How /flow-chart groups and orders the workflows. Workflows no group lists come last, under Other.\n'
+  const body: Record<string, unknown> = { groups: groups.map(g => ({ title: g.title, workflows: g.workflows })) }
+  if (Array.isArray(sources) && sources.length) body.sources = sources
+  return head + dump(body, { flowLevel: 3, lineWidth: 120 })
+}
 
-/** The page's sections: each group with the workflows it lists that exist, in order, then Other. */
-export function arrange<F extends Pick<Found, 'id'>>(found: F[], groups: LayoutGroup[]): Section<F>[] {
+/** The `sources:` list as a flows.yaml's text has it, untouched, for layoutYaml. */
+export function rawSources(text: string): unknown {
+  try {
+    const raw = text.trim() ? load(text) : undefined
+    return isObj(raw) ? raw.sources : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** A section from a source's own groups is read-only: Arrange does not offer to move or rename it. */
+export type Section<F> = { title: string; isOther: boolean; isSource?: boolean; items: F[] }
+
+/**
+ * The page's sections: each group with the workflows it lists that exist, in
+ * order, then each source's groups (`sourceGroups`, shown only when not empty),
+ * then Other.
+ */
+export function arrange<F extends Pick<Found, 'id'>>(found: F[], groups: LayoutGroup[], sourceGroups: LayoutGroup[] = []): Section<F>[] {
   const byId = new Map(found.map(f => [f.id, f]))
   const placed = new Set<string>()
-  const sections: Section<F>[] = groups.map(g => {
+  const take = (g: LayoutGroup) => {
     const items = g.workflows.map(id => byId.get(id)).filter((f): f is F => Boolean(f) && !placed.has(f!.id))
     for (const f of items) placed.add(f.id)
-    return { title: g.title, isOther: false, items }
-  })
+    return items
+  }
+  const sections: Section<F>[] = groups.map(g => ({ title: g.title, isOther: false, items: take(g) }))
+  for (const g of sourceGroups) {
+    const items = take(g)
+    if (items.length) sections.push({ title: g.title, isOther: false, isSource: true, items })
+  }
   const rest = found.filter(f => !placed.has(f.id))
   if (rest.length || !sections.length) sections.push({ title: OTHER, isOther: true, items: rest })
   return sections

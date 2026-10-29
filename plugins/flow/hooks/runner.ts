@@ -6,8 +6,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessSpawnResult, Register, Timer, TurnCompleteInput } from 'claude-code'
 
-import type { Found, ItemRun, Layout, LayoutGroup, Run, RunStatus, StepRun, StepSpec, StepStatus, Tier, Workflow } from '../types'
-import { LAYOUT_FILE, layoutYaml, parseLayout } from './layout'
+import type { Found, ItemRun, Layout, LayoutGroup, Run, RunStatus, Source, SourceState, StepRun, StepSpec, StepStatus, Tier, Workflow } from '../types'
+import { LAYOUT_FILE, layoutYaml, parseLayout, parseSources, rawSources } from './layout'
 import { rememberValues } from './file-finder'
 import {
   WORK_KINDS,
@@ -84,6 +84,10 @@ type AgentHit = { runId: string; stepId: string; index?: number }
 const agentSteps = new Map<string, AgentHit>()
 const queuedPrompts: { runId: string; stepId: string; text: string }[] = []
 let workflowsDir = '~/Documents/flows'
+/** Sources tried for a clone this load, so a bad URL is not cloned again on every refresh. */
+const cloneTried = new Set<string>()
+/** The last pull of each source, by name. */
+const pulls = new Map<string, { at: number; error?: string }>()
 let sessionCwd: string | undefined
 let isHydrated = false
 
@@ -106,14 +110,69 @@ async function cwdOf($: $): Promise<string> {
 // ---------------------------------------------------------------------------
 // Discovery
 
-/** Reads every workflow folder (the workflows folder, then <cwd>/.flows) into `workflows`. */
-export async function refreshWorkflows($: $): Promise<Found[]> {
+/** git, with a minute to finish; the error is its last stderr line. */
+async function git($: $, argv: string[], cwd?: string): Promise<string | undefined> {
+  try {
+    const r = await $.process.run(['git', ...argv], { ...(cwd ? { cwd } : {}), timeoutMs: 60_000, env: { GIT_TERMINAL_PROMPT: '0' } })
+    if (r.exitCode === 0) return undefined
+    return (r.stderr.trim().split('\n').pop() || `git ${argv[0]} exited ${r.exitCode}`).trim()
+  } catch (err) {
+    return errText(err)
+  }
+}
+
+async function cloneSource($: $, src: Source): Promise<string | undefined> {
+  if (!src.git) return `${src.path} does not exist`
+  const parent = src.path.replace(/\/[^/]+$/, '')
+  return git($, ['clone', '--quiet', ...(src.branch ? ['--branch', src.branch] : []), src.git, src.path], parent || undefined)
+}
+
+/**
+ * Pulls every source (fast-forward only), cloning the ones not here yet,
+ * then reads everything again. Returns one line per source.
+ */
+export async function pullSources($: $): Promise<string[]> {
+  const { sources } = await readSources($)
+  const lines: string[] = []
+  for (const src of sources) {
+    const isRepo = await $.fs.exists(`${src.path}/.git`).catch(() => false)
+    const isHere = isRepo || (await $.fs.exists(src.path).catch(() => false))
+    if (isHere && !isRepo) {
+      lines.push(`${src.title}: a plain folder, nothing to pull (${src.path})`)
+      continue
+    }
+    const error = isRepo ? await git($, ['pull', '--ff-only', '--quiet'], src.path) : await cloneSource($, src)
+    pulls.set(src.name, { at: await $.clock.now(), ...(error ? { error } : {}) })
+    lines.push(`${src.title}: ${error ? `failed: ${error}` : isRepo ? 'pulled' : 'cloned'} (${src.path})`)
+  }
+  await refreshWorkflows($)
+  return lines.length ? lines : [`no sources in ${workflowsDir}/${LAYOUT_FILE}`]
+}
+
+async function readSources($: $) {
   const homeDir = await home($)
   const base = expand(workflowsDir, homeDir).replace(/\/+$/, '')
+  const layoutFile = `${base}/${LAYOUT_FILE}`
+  const text = (await $.fs.exists(layoutFile).catch(() => false)) ? await $.fs.read(layoutFile).catch(() => '') : ''
+  return { base, layoutFile, text, ...parseSources(text, homeDir) }
+}
+
+/** Reads every workflow folder (the workflows folder, each source, then <cwd>/.flows) into `workflows`. */
+export async function refreshWorkflows($: $): Promise<Found[]> {
+  const { base, layoutFile, text, sources, errors: sourceErrors } = await readSources($)
+  // A source with a git URL that is not here yet is cloned, once per load.
+  for (const src of sources) {
+    if (!src.git || cloneTried.has(src.name) || (await $.fs.exists(src.path).catch(() => false))) continue
+    cloneTried.add(src.name)
+    const error = await cloneSource($, src)
+    pulls.set(src.name, { at: await $.clock.now(), ...(error ? { error } : {}) })
+  }
   const local = `${(await cwdOf($)).replace(/\/+$/, '')}/.flows`
-  const folders = base === local ? [base] : [base, local]
+  const folders: { path: string; source?: string }[] = [{ path: base }]
+  for (const src of sources) if (src.path !== base && src.path !== local) folders.push({ path: src.path, source: src.name })
+  if (local !== base) folders.push({ path: local })
   const found: Found[] = []
-  for (const folder of folders) {
+  for (const { path: folder, source } of folders) {
     if (!folder || !(await $.fs.exists(folder).catch(() => false))) continue
     const entries = await $.fs.list(folder).catch(() => [])
     for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
@@ -127,22 +186,40 @@ export async function refreshWorkflows($: $): Promise<Found[]> {
       } catch (err) {
         f = { id: entry.name, dir, file, errors: [`cannot read ${file}: ${errText(err)}`] }
       }
+      if (source) f.source = source
       const first = found.find(x => x.id === f.id)
       if (first) f.errors.push(`id: "${f.id}" is already used by ${first.file}`)
       found.push(f)
     }
   }
   await update($, workflowsAtom, () => found)
-  const layoutFile = `${base}/${LAYOUT_FILE}`
-  const text = (await $.fs.exists(layoutFile).catch(() => false)) ? await $.fs.read(layoutFile).catch(() => '') : ''
-  await update($, layoutAtom, () => ({ ...parseLayout(text), file: layoutFile }))
+
+  // Each source's own flows.yaml groups, titled "<source> · <group>", then the rest of its workflows under its title.
+  const states: SourceState[] = []
+  for (const src of sources) {
+    const ids = found.filter(f => f.source === src.name).map(f => f.id)
+    const own = `${src.path}/${LAYOUT_FILE}`
+    const ownText = (await $.fs.exists(own).catch(() => false)) ? await $.fs.read(own).catch(() => '') : ''
+    const groups = parseLayout(ownText).groups.map(g => ({ title: `${src.title} · ${g.title}`, workflows: g.workflows.filter(id => ids.includes(id)) }))
+    const pull = pulls.get(src.name)
+    states.push({
+      ...src,
+      isPresent: await $.fs.exists(src.path).catch(() => false),
+      count: ids.length,
+      groups: [...groups, { title: src.title, workflows: ids }],
+      ...(pull ? { pulledAt: pull.at, ...(pull.error ? { error: pull.error } : {}) } : {}),
+    })
+  }
+  const parsed = parseLayout(text)
+  const errors = [...parsed.errors, ...sourceErrors, ...states.filter(s => s.error).map(s => `sources: ${s.name}: ${s.error}`)]
+  await update($, layoutAtom, () => ({ ...parsed, errors, file: layoutFile, sources: states }))
   return found
 }
 
 /** Writes the groups to flows.yaml in the flows folder, then reads everything again. */
 export async function saveLayout($: $, groups: LayoutGroup[]): Promise<void> {
-  const base = expand(workflowsDir, await home($)).replace(/\/+$/, '')
-  await $.fs.write(`${base}/${LAYOUT_FILE}`, layoutYaml(groups))
+  const { layoutFile, text } = await readSources($)
+  await $.fs.write(layoutFile, layoutYaml(groups, rawSources(text)))
   await refreshWorkflows($)
 }
 
@@ -1441,6 +1518,43 @@ async function isEnvSet($: $, name: string): Promise<boolean> {
 }
 
 /**
+ * The MCP servers this workflow's mcp steps call that no Claude Code config
+ * on this Mac sets up: ~/.claude.json (user and this project's local scope)
+ * and the project's .mcp.json. claude.ai connectors and plugin servers are
+ * not in those files, so they are taken on trust.
+ */
+async function mcpProblems($: $, wf: Workflow, found: Found): Promise<string[]> {
+  const wanted = [...new Set(wf.steps.map(s => s.mcp?.server).filter((x): x is string => Boolean(x) && !x!.includes('{{')))]
+  const asked = wanted.filter(name => !/^claude\.ai /i.test(name) && !name.startsWith('plugin:'))
+  if (!asked.length) return []
+  const homeDir = await home($)
+  const cwd = (await cwdOf($)).replace(/\/+$/, '')
+  const names = new Set<string>()
+  const add = (servers: unknown) => {
+    if (servers && typeof servers === 'object') for (const k of Object.keys(servers)) names.add(k)
+  }
+  const readJson = async (path: string): Promise<Record<string, unknown> | undefined> => {
+    if (!(await $.fs.exists(path).catch(() => false))) return undefined
+    try {
+      return JSON.parse(await $.fs.read(path)) as Record<string, unknown>
+    } catch {
+      return undefined
+    }
+  }
+  const user = await readJson(`${homeDir}/.claude.json`)
+  // No config to judge by (another home, a test): leave it to the call.
+  if (!user) return []
+  add(user.mcpServers)
+  const projects = (user.projects ?? {}) as Record<string, { mcpServers?: unknown }>
+  add(projects[cwd]?.mcpServers)
+  add((await readJson(`${cwd}/.mcp.json`))?.mcpServers)
+  const setup = found.source ? ` (see the setup notes in ${found.dir.replace(/\/[^/]+$/, '')}/README.md)` : ''
+  return asked
+    .filter(name => !names.has(name))
+    .map(name => `MCP server "${name}" is not set up in Claude Code on this Mac${setup}. Add it with \`claude mcp add\`, then start a new session.`)
+}
+
+/**
  * Checks the workflow and the inputs and starts a run; problems mean nothing
  * started. `parent`: the run and uses step starting it as a child run (inputs
  * the child does not have are then problems too).
@@ -1455,7 +1569,7 @@ export async function startRun(
   let all = await read($, workflowsAtom)
   if (!all.some(f => f.id === workflowId)) all = await refreshWorkflows($)
   const found = all.find(f => f.id === workflowId && !f.errors.length) ?? all.find(f => f.id === workflowId)
-  if (!found) return { problems: [`no workflow "${workflowId}" (folders: ${workflowsDir} and .flows/ in the project)`] }
+  if (!found) return { problems: [`no workflow "${workflowId}" (folders: ${workflowsDir}, its sources, and .flows/ in the project; pull_sources fetches the sources)`] }
   const wf = found.workflow
   if (!wf || found.errors.length) return { problems: found.errors.length ? found.errors.map(e => `${found.file}: ${e}`) : [`${found.file} did not load`] }
 
@@ -1473,6 +1587,7 @@ export async function startRun(
     if (!ENV_NAME_RE.test(name)) problems.push(`env: "${name}" is not a variable name`)
     else if (!(await isEnvSet($, name))) problems.push(`${name} is not set in the environment`)
   }
+  problems.push(...(await mcpProblems($, wf, found)))
   for (const input of wf.inputs) {
     if ((input.type !== 'file' && input.type !== 'folder') || !values[input.id]?.trim()) continue
     const paths = input.multiple ? (values[input.id] ?? '').split('\n').map(p => p.trim()).filter(Boolean) : [(values[input.id] ?? '').trim()]
@@ -1600,6 +1715,7 @@ function describeWorkflow(f: Found) {
   const wf = f.workflow
   return {
     id: f.id,
+    ...(f.source ? { source: f.source } : {}),
     title: wf?.title ?? f.id,
     description: clip(wf?.description ?? '', 400),
     owner: wf?.owner ?? '',
@@ -1730,14 +1846,14 @@ async function validateText($: $, rawPath: string): Promise<string> {
 }
 
 async function registerTools($: $): Promise<void> {
-  const where = `Workflows are saved flow.yaml files, one folder each, in the flows folder (${workflowsDir}) and in .flows/ of the current project.`
+  const where = `Workflows are saved flow.yaml files, one folder each, in the flows folder (${workflowsDir}), in the sources its flows.yaml lists (teams' shared git repos, cloned under ~/.flow/sources), and in .flows/ of the current project.`
   const prefer =
     'Prefer fixed steps (run, python, mcp, http, wait, approve, uses), which run the same way every time; use agent or claude steps only where judgment is needed (summarising, writing prose, deciding).'
   await $.tool.register({
     name: 'list_workflows',
     description:
       `List the saved flow workflows the user can run. A workflow is a flow.yaml (a form of inputs and a list of steps: shell commands, python scripts, MCP tool calls, HTTP requests, flow agents, approval gates, prompts to this session, waits for a file, URL or time, and other workflows run as child runs; steps can have if: conditions, retries, for_each items and required output files). ${where} ` +
-      'Returns JSON: id, title, description, owner, tags, env (variables that must be set), inputs (id, label, type, required, options, default), steps (id, kind, title, isAI: true for agent and claude steps), aiSteps and fixedSteps (counts) and errors. ' +
+      'Returns JSON: id, source (the source it came from, when not the flows folder), title, description, owner, tags, env (variables that must be set), inputs (id, label, type, required, options, default), steps (id, kind, title, isAI: true for agent and claude steps), aiSteps and fixedSteps (counts) and errors. ' +
       `Use it when the user asks which workflows exist or wants to run one, before run_workflow. ${prefer}`,
     inputSchema: { type: 'object', properties: {} },
   })
@@ -1801,6 +1917,13 @@ async function registerTools($: $): Promise<void> {
     inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Path to a flow.yaml, or to the folder holding it.' } }, required: ['path'] },
   })
   await $.tool.register({
+    name: 'pull_sources',
+    description:
+      `Fetch the latest flow workflows from every source listed under sources: in ${workflowsDir}/flows.yaml (a team's shared git repo of workflows): clones the ones not on this Mac yet and fast-forwards the rest, then reloads the workflow list. ` +
+      'Returns one line per source: cloned, pulled, or why it failed (no access, a diverged branch). Use it when the user asks to update, pull or sync their workflows, or when a workflow they name is in a source but not found yet.',
+    inputSchema: { type: 'object', properties: {} },
+  })
+  await $.tool.register({
     name: 'cancel_run',
     description:
       'Cancel a flow workflow run that is running or waiting (by the run id): running and waiting steps are stopped and cancelled, pending ones skipped, no retry starts, and child runs its uses steps started are cancelled too. Only when the user asks to stop or cancel a run.',
@@ -1828,6 +1951,8 @@ async function registerTools($: $): Promise<void> {
 export function registerRunner(on: Parameters<Register>[0], options: Record<string, unknown>): void {
   live.clear()
   agentSteps.clear()
+  cloneTried.clear()
+  pulls.clear()
   queuedPrompts.length = 0
   isHydrated = false
   sessionCwd = undefined
@@ -1914,6 +2039,8 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     if (error) return { result: `error: ${error}` }
     return { result: `Recorded: step "${stepId}" ${ok ? 'approved' : 'rejected'}. Run ${runId} is now ${ctx.run.status}.` }
   })
+
+  on('tool.call', { tool: 'mcp__flow__pull_sources' }, async $ => ({ result: (await pullSources($)).join('\n') }))
 
   on('tool.call', { tool: 'mcp__flow__validate_workflow' }, async ($, e) => ({ result: await validateText($, str((e as unknown as { path?: unknown }).path)) }))
 

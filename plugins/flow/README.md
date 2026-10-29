@@ -2,6 +2,12 @@
 
 An orchestrated delivery flow for Claude Code. The session model plans the work, owns design, hands each piece to a tiered worker agent, and adversarially reviews what comes back. A progress bar shows the plan, which tasks are running, and how many are accepted.
 
+Install it in Claude Code:
+
+```text
+/plugin install flow --marketplace ebettenga/claude-config
+```
+
 The plugin ships:
 
 - the `flow` skill (the orchestrator), which Claude can also start by itself for substantial multi-step implementation work, after saying so in one line;
