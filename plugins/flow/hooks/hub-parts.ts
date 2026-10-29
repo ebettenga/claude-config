@@ -422,7 +422,17 @@ export async function loadCatalog($: EngineInterface): Promise<HubCatalog> {
  * deferred or refused does not show.
  */
 async function mcpServers($: EngineInterface): Promise<CatalogServer[]> {
-  const tools = await $.tool.list().catch(() => [])
+  // The list is the engine's; never let it hold up the page.
+  const tools = await Promise.race([
+    $.tool.list().catch(() => []),
+    new Promise<[]>(resolve => {
+      try {
+        $.clock.after(3000, () => resolve([]))
+      } catch {
+        resolve([])
+      }
+    }),
+  ])
   const byServer = new Map<string, string[]>()
   for (const t of tools) {
     const m = /^mcp__(.+?)__(.+)$/.exec(t.name)

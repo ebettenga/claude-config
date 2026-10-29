@@ -111,7 +111,21 @@ async function goTab($: $, tab: HubTab): Promise<void> {
   if (tab === 'runs') await update($, hubRun, () => '')
   await update($, hubTab, () => tab)
   // The last list shows at once; the fresh one replaces it once read.
-  if (tab === 'skills') await loadCatalog($).then(c => update($, hubCatalog, () => c)).catch(() => undefined)
+  if (tab === 'skills') await reloadCatalog($)
+}
+
+let isCatalogLoading = false
+
+/** Reads the skills, agents and MCP servers again; an empty catalog still shows, never "Looking…" for good. */
+async function reloadCatalog($: $): Promise<void> {
+  if (isCatalogLoading) return
+  isCatalogLoading = true
+  try {
+    const c = await loadCatalog($).catch(() => ({ ...EMPTY_CATALOG, at: Date.now() }))
+    await update($, hubCatalog, () => c)
+  } finally {
+    isCatalogLoading = false
+  }
 }
 
 async function workflowOfRun($: $, run: Run, found: Found[]): Promise<Workflow | undefined> {
@@ -211,7 +225,11 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     else if (tab === 'workflows') body = [runningCard(), tabsRow(), ...workflowsList()]
     else if (tab === 'runs' && openRun) body = [tabsRow(), ...(await runBoard(openRun))]
     else if (tab === 'runs') body = [tabsRow(), ...runsList()]
-    else body = [tabsRow(), ...skillsList()]
+    else {
+      // Opened on this tab (a reload, a new session): nothing was read yet, so read it now.
+      if (catalog.at === 0) void reloadCatalog($).catch(() => undefined)
+      body = [tabsRow(), ...skillsList()]
+    }
 
     const where =
       tab === 'workflows'
