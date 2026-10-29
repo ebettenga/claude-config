@@ -355,6 +355,27 @@ ${CRAB_CSS}${crab(rx(W - CRAB_W + 1, crabW), 0, 'other', false, isWorking, 0.8, 
 </svg>`
 }
 
+// Between flows: the same row with the logo, a status line, an empty track and the crab, resting
+// unless subagents are running.
+const idleSvg = (W: number, status: string, isWorking: boolean): string => {
+  const rtl = isRtl()
+  const text = fitText(status, 13, Math.max(60, W * 0.4))
+  const BAR_X = Math.round(TITLE_X + textWidth(text, 13) + 12)
+  const BAR_W = Math.max(60, W - BAR_X - 12 - CRAB_W)
+  const rx = (x: number, w: number): number => (rtl ? W - x - w : x)
+  const textAt = rtl ? `x="${W - TITLE_X}" direction="rtl" text-anchor="start"` : `x="${TITLE_X}"`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+<style>
+.m{fill:#8a8a8a}.k{fill:#e4e4e2}
+@media (prefers-color-scheme: dark){.m{fill:#9a9a9a}.k{fill:#2c2c2c}}
+</style>
+${logoMark(rtl ? W - LOGO_PX : 0, (H - LOGO_PX) / 2, LOGO_PX)}
+<text class="m" ${textAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(text)}</text>
+<rect class="k" x="${rx(BAR_X, BAR_W)}" y="${(H - BAR_H) / 2 + 5}" width="${BAR_W}" height="${BAR_H - 10}" rx="${(BAR_H - 10) / 2}"/>
+${CRAB_CSS}${crab(rx(W - CRAB_W + 1, CRAB_BOX * 0.8), 0, 'other', !isWorking, isWorking, 0.8, rtl)}
+</svg>`
+}
+
 const barText = (f: Flow, width: number): string => {
   const filled = Math.round(width * ratio(f))
   return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
@@ -1253,11 +1274,25 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
     // The `bar` option: `always` (the default) keeps an idle row up between flows; `flow` draws it only during one.
     if (f === null) {
       const running = list.filter(a => a.status === 'running').length
+      const status = running > 0 ? `${tr().busy} · ${running}` : tr().idle
+      if (e.surface !== 'terminal' && 'Svg' in ui) {
+        const { Svg } = ui
+        const width = Math.max(180, Math.min(1600, (e.props.bodyColumns || 100) * 8 - 72))
+        return (
+          <Box flexDirection="column">
+            <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={1}>
+              <Svg source={idleSvg(width, status, running > 0)} alt={`flow: ${status}`} width={width} height={H} />
+              <Button key="flow-agents" label={`×${list.length}`} plain onPress={() => void togglePane($)} />
+            </Box>
+            {below}
+          </Box>
+        )
+      }
       return (
         <Box flexDirection="column">
           <Box flexDirection={isRtl() ? 'row-reverse' : 'row'} alignItems="center" gap={2}>
             <Text color={running > 0 ? ACCENT : DONE}>●</Text>
-            <Text dimColor>{running > 0 ? `${tr().busy} · ${running}` : tr().idle}</Text>
+            <Text dimColor>{status}</Text>
             <Text color={CLAY}>▣</Text>
             <Button key="flow-agents" label={`×${list.length}`} plain onPress={() => void togglePane($)} />
           </Box>

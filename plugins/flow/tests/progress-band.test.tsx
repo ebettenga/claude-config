@@ -38,7 +38,7 @@ test('with no flow, the bar stays up idle by default', async ($, on) => {
   on('session.start', async () => ({ cwd: '/repo' }) as never)
   await $.session.start({ source: 'startup', cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
   const ui = await $.ui.mount({ plugin: 'flow', surface: 'desktop', ...BAND })
-  const idle = await ui.findAll({ type: 'Text', text: /^No flow running$/ })
+  const idle = await ui.findAll({ type: 'Svg', alt: 'flow: No flow running' })
   await ui.unmount()
   expect(idle.length).toBe(1)
 })
