@@ -114,8 +114,12 @@ async function workflowOfRun($: $, run: Run, found: Found[]): Promise<Workflow |
 
 // ── register ─────────────────────────────────────────────────────────────
 
+// Whether flow approves its own workers (the allowWorkers option); agent steps need it in auto mode.
+let allowWorkers = false
+
 export function registerHub(on: Parameters<Register>[0], options: Record<string, unknown>): void {
   workflowsDir = typeof options.workflowsDir === 'string' && options.workflowsDir.trim() ? options.workflowsDir.trim() : '~/Documents/flows'
+  allowWorkers = options.allowWorkers === 'on'
   snapshots.clear()
 
   // The command is registered and the env checked from the runner's
@@ -391,6 +395,9 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         chartCard(wf),
         wf.inputs.length ? card('inputs', [heading('Inputs', String(wf.inputs.length)), ...fields], {}) : null,
         problems.length ? <Box flexDirection="column" gap="xs">{problems.map((p, i) => note(`problem:${i}`, '!', p, C.dirty))}</Box> : null,
+        !allowWorkers && wf.steps.some(s => s.kind === 'agent')
+          ? note('workers-off', '!', 'Agent steps start flow workers, which auto mode refuses unless flow\u2019s "Let workflows start flow workers" setting is on (allowWorkers in flow\u2019s plugin settings).', C.dirty)
+          : null,
         wf.env.length
           ? (
               <Box flexDirection="column" gap="xs">

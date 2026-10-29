@@ -2,7 +2,9 @@
   "name": "flow",
   "version": "0.1.0",
   "description": "A work hub for Claude Code: an orchestrator that plans and delegates to tiered workers, YAML workflows that mix scripts and Claude, and /flow-chart to see and run them.",
-  "author": { "name": "Ethan Bettenga" },
+  "author": {
+    "name": "Ethan Bettenga"
+  },
   "license": "MIT",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -17,7 +19,21 @@
       "title": "Open the agents panel",
       "description": "flow: open it when flow workers start; any: for any subagent; off: only with /flow-agents.",
       "default": "flow",
-      "options": ["flow", "any", "off"]
+      "options": [
+        "flow",
+        "any",
+        "off"
+      ]
+    },
+    "allowWorkers": {
+      "type": "string",
+      "title": "Let workflows start flow workers",
+      "description": "on: flow approves the flow-light \u2026 flow-fable workers its own workflow runs start, so agent steps run in auto mode. Only those: any other agent, and every tool a worker uses, is still decided by your permission mode. off: agent steps are checked like any other agent, and auto mode refuses them.",
+      "default": "off",
+      "options": [
+        "off",
+        "on"
+      ]
     }
   }
 }

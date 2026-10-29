@@ -883,7 +883,10 @@ async function runAgent($: $, ctx: Live, spec: StepSpec, unit: Unit): Promise<vo
   appendLog($, ctx, unit.key, rec, `${prompt}\n\n`)
   await saveNow($, ctx)
   const title = value ? `${spec.title} [${value.value}]` : spec.title
-  const started = await $.agent.spawn({ subagentType: `flow:flow-${spec.tier ?? 'medium'}`, description: `${run.title}: ${title}`, prompt })
+  const subagentType = `flow:flow-${spec.tier ?? 'medium'}`
+  const description = `${run.title}: ${title}`
+  const release = expectWorker(subagentType, description)
+  const started = await $.agent.spawn({ subagentType, description, prompt }).finally(release)
   if (started.deny !== undefined) return endUnit($, ctx, spec, unit, 'failed', { error: started.deny })
   if (!started.agentId) return endUnit($, ctx, spec, unit, 'failed', { error: 'the agent did not start' })
   if (rec.status !== 'running') return
@@ -1601,6 +1604,34 @@ async function registerTools($: $): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Approving flow's own workers (the allowWorkers option)
+
+/** Worker spawns the runner is making right now: `<subagent type>|<description>` → count. */
+const expectedWorkers = new Map<string, number>()
+
+/** Marks a spawn as the runner's own until it settles; returns the release. */
+function expectWorker(subagentType: string, description: string): () => void {
+  const key = `${subagentType}|${description}`
+  expectedWorkers.set(key, (expectedWorkers.get(key) ?? 0) + 1)
+  let isReleased = false
+  return () => {
+    if (isReleased) return
+    isReleased = true
+    const n = (expectedWorkers.get(key) ?? 1) - 1
+    if (n > 0) expectedWorkers.set(key, n)
+    else expectedWorkers.delete(key)
+  }
+}
+
+/** Whether this Agent permission check is a worker spawn flow's runner is making itself. */
+export function isOwnWorkerSpawn(originPlugin: string, input: unknown): boolean {
+  if (originPlugin !== 'flow' || typeof input !== 'object' || input === null) return false
+  const { subagent_type: type, description } = input as { subagent_type?: unknown; description?: unknown }
+  if (typeof type !== 'string' || !/^flow:flow-(light|medium|careful|heavy|fable)$/.test(type)) return false
+  return expectedWorkers.has(`${type}|${typeof description === 'string' ? description : ''}`)
+}
+
 export function registerRunner(on: Parameters<Register>[0], options: Record<string, unknown>): void {
   live.clear()
   agentSteps.clear()
@@ -1608,6 +1639,17 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
   isHydrated = false
   sessionCwd = undefined
   workflowsDir = typeof options.workflowsDir === 'string' && options.workflowsDir.trim() ? options.workflowsDir.trim() : '~/Documents/flows'
+
+  // With allowWorkers on, flow says yes to the workers its own runs start, and
+  // to nothing else: every other Agent check, and every tool a worker then
+  // uses, is the session's permission mode's to decide, as without flow.
+  if (options.allowWorkers === 'on') {
+    on('tool.check', { tool: 'Agent' }, async (_$, e, next) => {
+      if (isOwnWorkerSpawn(next.origin.plugin, e.input))
+        return { decision: 'allow', reason: 'a flow workflow worker (flow: Let workflows start flow workers is on)' }
+      return next(e)
+    }).catch((_$, e, next) => next(e))
+  }
 
   // progress.tsx hooks session.start and turn.complete without a matcher, and a
   // plugin may do that once per event: these matchers name every case, so the
