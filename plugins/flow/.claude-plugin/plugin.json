@@ -1,0 +1,23 @@
+{
+  "name": "flow",
+  "version": "0.1.0",
+  "description": "A work hub for Claude Code: an orchestrator that plans and delegates to tiered workers, YAML workflows that mix scripts and Claude, and /flow-chart to see and run them.",
+  "author": { "name": "Ethan Bettenga" },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "workflowsDir": {
+      "type": "string",
+      "title": "Workflows folder",
+      "description": "Folder holding workflow folders (each with a flow.yaml). A .flows/ folder in the current project is read too.",
+      "default": "~/Documents/flows"
+    },
+    "autoOpen": {
+      "type": "string",
+      "title": "Open the agents panel",
+      "description": "flow: open it when flow workers start; any: for any subagent; off: only with /flow-agents.",
+      "default": "flow",
+      "options": ["flow", "any", "off"]
+    }
+  }
+}

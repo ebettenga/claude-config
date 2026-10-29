@@ -88,12 +88,19 @@ ln -sfn ~/Documents/claude-config/bin/claude-as ~/.local/bin/claude-as
 
 It copies the portable parts of `~/.claude/settings.json` (plugins, marketplaces, plugin options, notifications, output style, status line) and any skills not already linked from here, then shows `git status`. Review the diff and commit. Permissions, hooks and `env` are left out on purpose: they tend to be machine-specific or hold secrets.
 
+## flow
+
+`plugins/flow/` is how big tasks get done. `/flow:flow <task>` starts an orchestrator that plans, owns the design, hands the work to tiered workers (`flow-fable`, `flow-heavy`, `flow-careful`, `flow-medium`, `flow-light`) and reviews what they send back. You rarely need to type it: flow starts itself for substantial multi-file work. `/flow-agents` opens a progress bar for the running workers.
+
+It also runs workflows: YAML files (`flow.yaml`) that mix scripts and Claude steps, seen and run from `/flow-chart`. They live in `~/Documents/flows`, a separate repo (set by the plugin's `workflowsDir` option); a project's own `.flows/` folder is read too.
+
 ## Layout
 
 | Path | What |
 |---|---|
 | `.claude-plugin/marketplace.json` | The `ethan-claude` marketplace: my own plugins |
 | `plugins/filedeck/` | Filedeck, a file pane with what Claude touched, a badge-styled tree with inline diffs, and a git panel to stage, commit and push |
+| `plugins/flow/` | flow, the orchestrator with tiered workers, YAML workflows and `/flow-chart` |
 | `settings/settings.json` | Portable settings; `{{REPO}}` stands for this folder's path |
 | `settings/mcp.json` | Optional: MCP servers for every project, `${VAR}` for secrets (an export writes one) |
 | `skills/` | User-level skills, `claude-as` among them |

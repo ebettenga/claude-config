@@ -1,6 +1,6 @@
 {
   "enabledPlugins": {
-    "savvy-progress@claude-kit": true,
+    "savvy-progress@claude-kit": false,
     "skins@hellosverre-mods": true,
     "filetree@claude-code-filetree": false,
     "cache-tax@claude-code-mods": true,
@@ -11,7 +11,8 @@
     "cc-plugin-you-should-know@builtin": true,
     "prismantis@prismantis": false,
     "filedeck@ethan-claude": true,
-    "savvy-flow@claude-kit": true
+    "savvy-flow@claude-kit": false,
+    "flow@ethan-claude": true
   },
   "extraKnownMarketplaces": {
     "claude-kit": {
