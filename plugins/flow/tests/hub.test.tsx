@@ -468,3 +468,137 @@ steps:
     await ui.unmount()
   })
 }
+
+const RESULTS = `
+title: Results
+steps:
+  - id: make
+    title: Make files
+    run: make-files
+  - id: ok
+    title: Review
+    approve: Publish the files?
+  - id: final
+    title: Final check
+    approve: Ship it?
+outputs:
+  - summary.md
+  - { file: sales.csv, title: Totals by category, chart: { type: bar, x: category, y: price, agg: sum } }
+  - { file: weather.csv, title: Weather totals, chart: { type: bar, x: category, y: price } }
+  - rows.csv
+`
+
+/** The files a Results run leaves: a long summary, two charted CSVs (one without the column), a plain CSV, two chart.json files. */
+function resultFiles(dir: string): Record<string, string> {
+  return {
+    [`${dir}/summary.md`]: ['# Summary', ...Array.from({ length: 99 }, (_, i) => `- line ${i + 1}`)].join('\n'),
+    [`${dir}/sales.csv`]: 'date,category,price\r\n2026-09-01,Apparel,64.00\r\n2026-09-02,"Bags, large",200\r\n2026-09-03,Apparel,"1,036.00"\r\n',
+    [`${dir}/weather.csv`]: 'date,city,temp\n2026-09-01,Phoenix,101\n',
+    [`${dir}/rows.csv`]: ['name,n,note', ...Array.from({ length: 12 }, (_, i) => `row ${i + 1},${i},"a, b"`)].join('\n'),
+    [`${dir}/trend.chart.json`]: JSON.stringify({ type: 'line', title: 'Sales by day', labels: ['09-01', '09-02', '09-03'], series: [{ name: 'total', values: [64, 200, 1036] }] }),
+    [`${dir}/broken.chart.json`]: JSON.stringify({ type: 'pie', labels: [], series: [] }),
+  }
+}
+
+for (const surface of SURFACES) {
+  test(`Results: approvals, a summary, charts, a bad chart's note and a table preview (${surface})`, { timeoutMs: 20_000 }, async ($, on) => {
+    const w = world(on, { [`${FLOWS}/results/flow.yaml`]: RESULTS })
+    await begin($, surface)
+    const { result } = (await $.tool.call({ tool: 'mcp__flow__run_workflow', id: 'results', inputs: {} } as never)) as { result: string }
+    const id = /^Started run (\S+)\./.exec(result)?.[1] ?? ''
+    const dir = `${RUNS}/results/${id}`
+    await w.clock.settle()
+    for (const [k, v] of Object.entries(resultFiles(dir))) w.fs.set(k, v)
+    w.procs[0]?.finish(0)
+    await w.clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface })
+    let all = await texts(ui)
+    expect(all).toContain('RESULTS')
+    expect(all).toContain('FILES')
+    expect(all).not.toContain('OUTPUTS')
+
+    // 1. Approvals: the waiting one with its buttons, the next not reached yet.
+    expect(all).toContain('WAITING FOR YOU · REVIEW')
+    expect(await ui.find({ type: 'Text', text: /^Publish the files\?$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'approve:ok' })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'reject:ok' })).toBeTruthy()
+    expect(all).toContain('FINAL CHECK')
+    expect(all).toMatch(/not reached/)
+    expect(await ui.find({ type: 'Text', text: /^Ship it\?$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'approve:final' })).toBeFalsy()
+
+    // 2. Summaries: Markdown, capped at 80 lines, folding.
+    const md = async () => (await ui.findAll({ type: 'Markdown' })).map(m => String(m.props.text))
+    const summary = (await md()).find(t => t.startsWith('# Summary'))
+    expect(summary?.split('\n').length).toBe(80)
+    expect(all).toContain('… 20 more lines, View for all')
+    expect(await md()).toContain(`[View](file://${dir}/summary.md)`)
+
+    // 3. Charts: the declared bar chart, the chart.json line, and two notes.
+    if (surface === 'desktop') {
+      const svgs = (await ui.findAll({ type: 'Svg' })).map(e => ({ alt: String(e.props.alt), source: String(e.props.source) }))
+      const bar = svgs.find(s => s.alt.startsWith('Bar chart, Totals by category'))
+      expect(bar?.alt).toContain('Apparel 1,100')
+      expect(bar?.alt).toContain('Bags, large 200')
+      expect(bar?.source).toContain('<path d="M')
+      expect(bar?.source).toContain('<title>Apparel: 1,100</title>')
+      const line = svgs.find(s => s.alt.startsWith('Line chart, Sales by day'))
+      expect(line?.source).toContain('<polyline')
+    } else {
+      expect(await ui.find({ type: 'Svg' })).toBeFalsy()
+      expect(all).toMatch(/Apparel +█+ 1,100/)
+      expect(all).toMatch(/Bags, large +█+ 200/)
+      expect(all).toMatch(/09-03 +█+ 1,036/)
+    }
+    expect(all).toContain('Totals by category')
+    expect(all).toContain('sum of price by category')
+    expect(all).toContain('chart: no column category')
+    expect(all).toContain('chart: type "pie": use bar or line')
+
+    // 4. Tables: the header, the first 10 rows and the size.
+    const table = (await md()).find(t => t.startsWith('| name | n | note |'))
+    expect(table).toContain('| row 10 | 9 | a, b |')
+    expect(table).not.toContain('row 11')
+    expect(all).toContain('12 rows × 3 columns')
+
+    // Folding a summary hides it; the table stays.
+    await ui.press({ key: 'res:summary.md' })
+    expect((await md()).some(t => t.startsWith('# Summary'))).toBe(false)
+    expect((await md()).some(t => t.startsWith('| name |'))).toBe(true)
+    await ui.press({ key: 'res:summary.md' })
+    expect((await md()).some(t => t.startsWith('# Summary'))).toBe(true)
+
+    // Decided with a note, then the next approval waits and Approve finishes the run.
+    await $.tool.call({ tool: 'mcp__flow__decide_step', run: id, step: 'ok', ok: true, output: 'Looks right' } as never)
+    await w.clock.settle()
+    all = await texts(ui)
+    expect(all).toMatch(/approved/)
+    expect(all).toContain('Note: Looks right')
+    expect(all).toContain('WAITING FOR YOU · FINAL CHECK')
+    await ui.press({ key: 'approve:final' })
+    await w.clock.settle()
+    expect(w.runFile('results', id).status).toBe('done')
+    expect(await ui.find({ type: 'Button', key: 'approve:final' })).toBeFalsy()
+    all = await texts(ui)
+    expect(all).not.toContain('WAITING FOR YOU')
+    expect(all).not.toMatch(/not reached/)
+    await ui.unmount()
+  })
+
+  test(`pressing a step on a run shows its log while another step runs (${surface})`, async ($, on) => {
+    const w = world(on, { [`${FLOWS}/gate/flow.yaml`]: GATE })
+    await begin($, surface)
+    await $.tool.call({ tool: 'mcp__flow__run_workflow', id: 'gate', inputs: {} } as never)
+    await w.clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Text', text: /^LOG · MAKE REPORT$/ })).toBeTruthy()
+    await ui.press({ key: 'step:ok' })
+    expect(await ui.find({ type: 'Text', text: /^LOG · REVIEW$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /^Not started yet$/ })).toBeTruthy()
+    await ui.press({ key: 'step:make' })
+    expect(await ui.find({ type: 'Text', text: /^LOG · MAKE REPORT · LIVE$|^LOG · MAKE REPORT$/ })).toBeTruthy()
+    w.procs[0]?.finish(0)
+    await w.clock.settle()
+    await ui.unmount()
+  })
+}

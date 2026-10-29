@@ -2,9 +2,9 @@
 // so the rules can be tested on their own; register.tsx reads the files.
 
 import { load } from './vendor/js-yaml.mjs'
-import type { Found, HttpSpec, InputSpec, InputType, McpSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow } from '../types'
+import type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow } from '../types'
 
-export type { Found, HttpSpec, InputSpec, InputType, McpSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow }
+export type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow }
 
 export const INPUT_TYPES = ['text', 'textarea', 'number', 'boolean', 'date', 'select', 'file', 'folder'] as const satisfies readonly InputType[]
 export const TIERS = ['light', 'medium', 'careful', 'heavy', 'fable'] as const satisfies readonly Tier[]
@@ -16,6 +16,13 @@ export const MCP_FIELDS = ['server', 'tool', 'args'] as const
 export const HTTP_FIELDS = ['method', 'url', 'headers', 'body', 'expect'] as const
 export const WAIT_KINDS = ['file', 'url', 'until'] as const
 export const FILTERS = ['sh', 'json'] as const
+export const OUTPUT_FIELDS = ['file', 'title', 'chart'] as const
+export const CHART_FIELDS = ['type', 'x', 'y', 'agg', 'top', 'sort'] as const
+export const CHART_TYPES = ['bar', 'line'] as const satisfies readonly ChartType[]
+export const CHART_AGGS = ['sum', 'count', 'mean'] as const satisfies readonly ChartAgg[]
+const CHART_SORTS = ['value', 'label'] as const
+const MAX_CHART_TOP = 50
+const DEFAULT_CHART_TOP = 12
 
 const ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const DEFAULT_TIMEOUT_SEC = 600
@@ -446,9 +453,68 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
     env: envNames,
     inputs,
     steps,
-    outputs: strList(doc.outputs),
+    outputs: parseOutputs(doc.outputs, errors),
   }
   return found
+}
+
+const fileName = (p: string) => p.replace(/\/+$/, '').split('/').pop() || p
+
+/** Top-level `outputs:`: paths, or `{ file, title?, chart? }` mappings; problems go to `errors` by field. */
+export function parseOutputs(raw: unknown, errors: string[]): OutputSpec[] {
+  if (raw === undefined || raw === null) return []
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : null
+  if (!list) {
+    errors.push('outputs: must be a list of paths in the run folder, or of { file, title, chart } mappings')
+    return []
+  }
+  const outputs: OutputSpec[] = []
+  list.forEach((item, i) => {
+    const at = `outputs[${i}]`
+    if (typeof item === 'string' || typeof item === 'number') {
+      const file = String(item).trim()
+      if (file) outputs.push({ file, title: fileName(file) })
+      return
+    }
+    if (!isObj(item)) return void errors.push(`${at}: must be a path or a mapping with file (and title, chart)`)
+    for (const k of Object.keys(item)) if (!(OUTPUT_FIELDS as readonly string[]).includes(k)) errors.push(`${at}.${k}: is not an output field (use ${OUTPUT_FIELDS.join(', ')})`)
+    const file = str(item.file).trim()
+    if (!file) errors.push(`${at}.file: is required (a path in the run folder)`)
+    if (item.title !== undefined && typeof item.title !== 'string') errors.push(`${at}.title: must be text`)
+    const spec: OutputSpec = { file, title: str(item.title).trim() || fileName(file) }
+    if (item.chart !== undefined) {
+      const chart = parseOutputChart(item.chart, `${at}.chart`, errors)
+      if (chart && file && !/\.(csv|tsv|json)$/i.test(file)) errors.push(`${at}.chart: only a .csv, .tsv or .json output can be charted`)
+      if (chart) spec.chart = chart
+    }
+    if (file) outputs.push(spec)
+  })
+  return outputs
+}
+
+function parseOutputChart(raw: unknown, at: string, errors: string[]): OutputChart | undefined {
+  if (!isObj(raw)) {
+    errors.push(`${at}: must be a mapping with type and x (and y, agg, top, sort)`)
+    return undefined
+  }
+  const before = errors.length
+  for (const k of Object.keys(raw)) if (!(CHART_FIELDS as readonly string[]).includes(k)) errors.push(`${at}.${k}: is not a chart field (use ${CHART_FIELDS.join(', ')})`)
+  const type = str(raw.type) as ChartType
+  if (raw.type === undefined) errors.push(`${at}.type: is required (${CHART_TYPES.join(' or ')})`)
+  else if (!CHART_TYPES.includes(type)) errors.push(`${at}.type: "${str(raw.type)}" must be ${CHART_TYPES.join(' or ')}`)
+  const x = str(raw.x).trim()
+  if (!x) errors.push(`${at}.x: is required (the column to group by)`)
+  const y = raw.y === undefined || raw.y === null ? undefined : str(raw.y).trim() || undefined
+  if (raw.y !== undefined && raw.y !== null && !y) errors.push(`${at}.y: must name a numeric column`)
+  const agg = (raw.agg === undefined ? (y ? 'sum' : 'count') : str(raw.agg)) as ChartAgg
+  if (!CHART_AGGS.includes(agg)) errors.push(`${at}.agg: "${str(raw.agg)}" must be one of ${CHART_AGGS.join(', ')}`)
+  else if (agg !== 'count' && !y) errors.push(`${at}.agg: ${agg} needs y (a numeric column)`)
+  const top = raw.top === undefined ? DEFAULT_CHART_TOP : raw.top
+  if (typeof top !== 'number' || !Number.isInteger(top) || top < 1 || top > MAX_CHART_TOP) errors.push(`${at}.top: must be a whole number from 1 to ${MAX_CHART_TOP}`)
+  const sort = (raw.sort === undefined ? (type === 'line' ? 'label' : 'value') : str(raw.sort)) as OutputChart['sort']
+  if (!CHART_SORTS.includes(sort)) errors.push(`${at}.sort: "${str(raw.sort)}" must be value or label`)
+  if (errors.length > before) return undefined
+  return { type, x, ...(y ? { y } : {}), agg, top: top as number, sort }
 }
 
 function hasCycle(steps: StepSpec[]): boolean {

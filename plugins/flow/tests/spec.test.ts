@@ -587,3 +587,51 @@ describe('JSON paths', () => {
     expect(parseCondition('steps.f.output[0]').error).toMatch(/^"steps.f.output\[0\]" is not a reference/)
   })
 })
+
+describe('outputs: paths or { file, title, chart }', () => {
+  test('both forms read; a chart gets its defaults', () => {
+    const found = parse(`
+steps:
+  - id: a
+    run: echo
+outputs:
+  - report.md
+  - { file: sales.csv, title: Totals by category, chart: { type: bar, x: category, y: price } }
+  - file: visits.tsv
+    chart: { type: line, x: date, top: 30 }
+  - { file: notes.txt }
+`)
+    expect(found.errors).toEqual([])
+    expect(found.workflow?.outputs).toEqual([
+      { file: 'report.md', title: 'report.md' },
+      { file: 'sales.csv', title: 'Totals by category', chart: { type: 'bar', x: 'category', y: 'price', agg: 'sum', top: 12, sort: 'value' } },
+      { file: 'visits.tsv', title: 'visits.tsv', chart: { type: 'line', x: 'date', agg: 'count', top: 30, sort: 'label' } },
+      { file: 'notes.txt', title: 'notes.txt' },
+    ])
+  })
+
+  test('a bad chart field is named', () => {
+    expect(
+      errorsOf(`
+steps:
+  - id: a
+    run: echo
+outputs:
+  - { file: a.csv, chart: { type: pie, x: category } }
+  - { file: b.csv, chart: { type: bar, agg: mean, top: 0, colour: red } }
+  - { file: c.md, chart: { type: bar, x: k } }
+  - { title: No file }
+  - { file: d.csv, chart: { type: line, x: day, sort: random } }
+`),
+    ).toEqual([
+      'outputs[0].chart.type: "pie" must be bar or line',
+      'outputs[1].chart.colour: is not a chart field (use type, x, y, agg, top, sort)',
+      'outputs[1].chart.x: is required (the column to group by)',
+      'outputs[1].chart.agg: mean needs y (a numeric column)',
+      'outputs[1].chart.top: must be a whole number from 1 to 50',
+      'outputs[2].chart: only a .csv, .tsv or .json output can be charted',
+      'outputs[3].file: is required (a path in the run folder)',
+      'outputs[4].chart.sort: "random" must be value or label',
+    ])
+  })
+})

@@ -148,7 +148,43 @@ export type Workflow = {
   env: string[]
   inputs: InputSpec[]
   steps: StepSpec[]
-  outputs: string[]
+  /** What the run leaves for people: shown after a run (Markdown rendered, CSVs as tables or charts). */
+  outputs: OutputSpec[]
+}
+
+export type ChartType = 'bar' | 'line'
+export type ChartAgg = 'sum' | 'count' | 'mean'
+
+/** A declared output's chart: one bar or line per group of `x` (a CSV/TSV column, or a JSON array's key). */
+export type OutputChart = {
+  type: ChartType
+  x: string
+  /** The numeric column summed, averaged or (absent) counted. */
+  y?: string
+  /** Default sum, or count when there is no y. */
+  agg: ChartAgg
+  /** The biggest groups kept (default 12). */
+  top: number
+  /** Default value (biggest first) for bars, label for lines. */
+  sort: 'value' | 'label'
+}
+
+/** A workflow-level output: written as a path, or `{ file, title?, chart? }`. */
+export type OutputSpec = {
+  /** A path in the run folder (templated). */
+  file: string
+  /** Default: the file name. */
+  title: string
+  chart?: OutputChart
+}
+
+/** A chart as drawn: from a declared output's chart or a `*.chart.json` file (flow.chart in python). */
+export type ChartData = {
+  type: ChartType
+  title: string
+  labels: string[]
+  series: { name: string; values: number[] }[]
+  yLabel?: string
 }
 
 /** One workflow folder as found: the workflow when it reads, the problems either way. */
@@ -246,6 +282,8 @@ export type HubForms = Record<string, Record<string, string>>
 export type HubEnv = Record<string, boolean>
 /** Problems by workflow id (or `rerun:<run id>`). */
 export type HubAttempts = Record<string, string[]>
+/** By run id: the Results blocks (output paths) shown collapsed. */
+export type HubOpenResults = Record<string, string[]>
 
 declare module 'claude-code' {
   interface PluginState {
@@ -277,6 +315,8 @@ declare module 'claude-code' {
       hubEnv: Shaped<HubEnv>
       /** Workflows the person pressed Run on: the problems inputProblems does not cover (env, missing files). */
       hubAttempts: Shaped<HubAttempts>
+      /** By run id: the Results blocks shown collapsed (absent: all but the first two open). */
+      hubOpenResults: Shaped<HubOpenResults>
     }
   }
 }

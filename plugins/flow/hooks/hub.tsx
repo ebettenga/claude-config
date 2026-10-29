@@ -6,7 +6,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Found, HubAttempts, HubCatalog, HubEnv, HubForms, HubPicker, HubTab, InputSpec, Run, StepSpec, Workflow } from '../types'
+import type { ChartData, Found, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Run, StepRun, StepSpec, Workflow } from '../types'
+import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
+import type { Table } from './charts'
 import { findFolders, findOnMac, pastPicks, recentRunFiles, rememberPick, type SuggestedFile } from './file-finder'
 import {
   C,
@@ -25,6 +27,7 @@ import {
   duration,
   expandHome,
   fileIconOf,
+  fillOutputPath,
   firstLine,
   firstSentence,
   folderIconOf,
@@ -34,6 +37,8 @@ import {
   loadCatalog,
   nowLine,
   outputCandidates,
+  outputContext,
+  outputSpecs,
   parseLogKey,
   plural,
   progressOf,
@@ -47,13 +52,16 @@ import {
 import { checkEnv, openHub, showRun, showWorkflow } from './hub-state'
 import { SVG } from './icons'
 import { cancelRun, decideStep, refreshWorkflows, rerun, resumeRun, startRun } from './runner'
-import { STEP_KINDS, defaultValue, inputProblems, isAIStep, stepLevels } from './spec'
+import { STEP_KINDS, defaultValue, fill, inputProblems, isAIStep, stepLevels } from './spec'
 
 type $ = EngineInterface
 
 const PANE = 'flow-chart'
 const MAX_PICKER_ROWS = 200
 const LOG_LINES = 40
+/** A summary shows this many lines; View opens the rest. */
+const SUMMARY_LINES = 80
+const SUMMARY_CHARS = 20_000
 
 const EMPTY_CATALOG: HubCatalog = { skills: [], agents: [], at: 0 }
 
@@ -72,11 +80,15 @@ const hubFrame = atom({ plugin: 'flow', key: 'hubFrame' } as const, 0, { shape: 
 const hubCatalog = atom({ plugin: 'flow', key: 'hubCatalog' } as const, EMPTY_CATALOG, { shape: 'hub-catalog-1' })
 const hubEnv = atom({ plugin: 'flow', key: 'hubEnv' } as const, {} as HubEnv, { shape: 'hub-env-1' })
 const hubAttempts = atom({ plugin: 'flow', key: 'hubAttempts' } as const, {} as HubAttempts, { shape: 'hub-attempts-1' })
+const hubOpenResults = atom({ plugin: 'flow', key: 'hubOpenResults' } as const, {} as HubOpenResults, { shape: 'hub-open-results-1' })
 
 // Module scope is fine here: registerHub sets these again on every (re)load.
 let workflowsDir = '~/Documents/flows'
 /** Each run's workflow.json, the steps it ran (a run's own copy never changes). */
 const snapshots = new Map<string, Workflow>()
+/** Results files read, by path, time and size: a running run draws every frame. */
+const reads = new Map<string, string>()
+const MAX_READS = 24
 
 // ── actions ──────────────────────────────────────────────────────────────
 
@@ -112,6 +124,22 @@ async function workflowOfRun($: $, run: Run, found: Found[]): Promise<Workflow |
   return found.find(f => f.id === run.workflowId)?.workflow
 }
 
+/** A Results file's text, at most MAX_RESULT_BYTES, read again only once it changes. */
+async function readResult($: $, abs: string): Promise<{ text?: string; problem?: string }> {
+  const name = abs.split('/').pop() ?? abs
+  const st = await $.fs.stat(abs).catch(() => undefined)
+  if (!st || st.kind !== 'file') return { problem: `${name} is not a file` }
+  if (st.size > MAX_RESULT_BYTES) return { problem: `${name} is over 2 MB` }
+  const key = `${abs}\n${st.mtimeMs}\n${st.size}`
+  const hit = reads.get(key)
+  if (hit !== undefined) return { text: hit }
+  const text = await $.fs.read(abs).catch(() => undefined)
+  if (text === undefined) return { problem: `cannot read ${name}` }
+  if (reads.size >= MAX_READS) reads.delete(reads.keys().next().value ?? '')
+  reads.set(key, text)
+  return { text }
+}
+
 // ── register ─────────────────────────────────────────────────────────────
 
 // Whether flow approves its own workers (the allowWorkers option); agent steps need it in auto mode.
@@ -121,6 +149,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
   workflowsDir = typeof options.workflowsDir === 'string' && options.workflowsDir.trim() ? options.workflowsDir.trim() : '~/Documents/flows'
   allowWorkers = options.allowWorkers === 'on'
   snapshots.clear()
+  reads.clear()
 
   // The command is registered and the env checked from the runner's
   // session.start (hubSessionStart), and a run opens the pane from startRun.
@@ -144,7 +173,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     const width = Math.max(30, e.props.bodyColumns ?? 60)
     // The body in pixels, as progress.tsx reckons it; a card's inside is ~40 px less.
     const px = Math.max(160, Math.min(900, width * 8 - 8))
-    const [found, runs, tab, wfId, runId, forms, picked, q, logKey, frame, catalog, env, attempts] = await Promise.all([
+    const [found, runs, tab, wfId, runId, forms, picked, q, logKey, frame, catalog, env, attempts, openResults] = await Promise.all([
       read($, workflowsAtom),
       read($, runsAtom),
       read($, hubTab),
@@ -158,6 +187,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       read($, hubCatalog),
       read($, hubEnv),
       read($, hubAttempts),
+      read($, hubOpenResults),
     ])
     const now = await $.clock.now()
     const cwd = await $.session.cwd().catch(() => '')
@@ -729,6 +759,30 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
 
     function chip(spec: StepSpec, run?: Run) {
       const s = chipState(spec, run)
+      const kindLine = (
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Text color={s.color} size="caption" weight="bold">{`● ${spec.kind.toUpperCase()}`}</Text>
+          {isAIStep(spec) ? pill('AI', s.color, tint(s.color, '26'), 'caption') : null}
+          <Box flexGrow={1} />
+          {s.mark ? <Text color={s.mark.color} weight="bold" size="footnote">{s.mark.glyph}</Text> : null}
+        </Box>
+      )
+      // On a run, the whole step is one press: it shows that step's log, live or not.
+      const body = run
+        ? (
+            <Button key={`step:${spec.id}`} plain onPress={() => void update($, hubLogStep, () => spec.id)}>
+              <Text color={s.color} size="caption" weight="bold">{`● ${spec.kind.toUpperCase()}${isAIStep(spec) ? '  AI' : ''}${s.mark ? `  ${s.mark.glyph}` : ''}\n`}</Text>
+              <Text weight="semibold" color={s.titleColor} dimColor={s.isDim} wrap="truncate-end">{spec.title}</Text>
+              {s.sub ? <Text dimColor size="footnote" wrap="truncate-end">{`\n${s.sub}`}</Text> : ''}
+            </Button>
+          )
+        : (
+            <Box flexDirection="column" minWidth={0} overflow="hidden">
+              {kindLine}
+              <Text weight="semibold" wrap="truncate-end">{spec.title}</Text>
+              {s.sub ? <Text dimColor size="footnote" wrap="truncate-end">{s.sub}</Text> : null}
+            </Box>
+          )
       return (
         <Box
           key={`chip:${spec.id}`}
@@ -736,28 +790,14 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           flexDirection="column"
           paddingX={1}
           paddingY="xs"
-          backgroundColor={s.isRunning ? tint(s.color, '33') : C.chip}
+          backgroundColor={s.isRunning ? tint(s.color, '33') : s.isSelected ? tint(s.color, '1f') : C.chip}
           borderStyle="round"
           borderColor={s.isRunning || s.isSelected ? s.color : C.border}
           minWidth={0}
           overflow="hidden"
+          hover={run ? { backgroundColor: tint(s.color, '26') } : undefined}
         >
-          <Box flexDirection="row" alignItems="center" gap={1}>
-            <Text color={s.color} size="caption" weight="bold">{`● ${spec.kind.toUpperCase()}`}</Text>
-            {isAIStep(spec) ? pill('AI', s.color, tint(s.color, '26'), 'caption') : null}
-            <Box flexGrow={1} />
-            {s.mark ? <Text color={s.mark.color} weight="bold" size="footnote">{s.mark.glyph}</Text> : null}
-          </Box>
-          <Box minWidth={0} overflow="hidden">
-            {run
-              ? (
-                  <Button key={`step:${spec.id}`} plain onPress={() => void update($, hubLogStep, () => spec.id)}>
-                    <Text weight="semibold" color={s.titleColor} dimColor={s.isDim} wrap="truncate-end">{spec.title}</Text>
-                  </Button>
-                )
-              : <Text weight="semibold" wrap="truncate-end">{spec.title}</Text>}
-          </Box>
-          {s.sub ? <Text dimColor size="footnote" wrap="truncate-end">{s.sub}</Text> : null}
+          {body}
         </Box>
       )
     }
@@ -917,23 +957,11 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         )
       }
 
-      // waiting on you, waiting on Claude
+      // waiting on Claude (an approval waits in Results)
       for (const s of run.steps) {
         if (s.status !== 'waiting') continue
         const spec = specOf(s.id)
-        if (spec?.kind === 'approve') {
-          const question = s.tail.trim() || spec.body.trim()
-          parts.push(
-            card(`approve:${s.id}`, [
-              <Text size="footnote" weight="bold" color={C.dirty}>{`WAITING FOR YOU · ${spec.title.toUpperCase()}`}</Text>,
-              <Text weight="semibold">{question}</Text>,
-              <Box flexDirection="row" gap={1}>
-                <Button key={`approve:${s.id}`} variant="primary" onPress={() => void decideStep($, run.id, s.id, true)}>Approve</Button>
-                <Button key={`reject:${s.id}`} onPress={() => void decideStep($, run.id, s.id, false)}>Reject</Button>
-              </Box>,
-            ], { fill: tint(C.dirty, '14'), stroke: tint(C.dirty, '66') }),
-          )
-        } else if (spec?.kind === 'claude') {
+        if (spec?.kind === 'claude') {
           parts.push(
             card(`claude:${s.id}`, [
               <Text size="footnote" weight="bold" color={C.edit}>WAITING FOR CLAUDE</Text>,
@@ -942,6 +970,8 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           )
         }
       }
+
+      if (wf) parts.push(await resultsCard(run, wf))
 
       // outputs
       const outs: { rel: string; abs: string }[] = []
@@ -952,7 +982,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         }
       parts.push(
         card('outputs', [
-          heading('Outputs', isActive ? `${outs.length} so far` : String(outs.length)),
+          heading('Files', isActive ? `${outs.length} so far` : String(outs.length)),
           ...outs.map(o => (
             <Box key={`out:${o.rel}`} flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
               <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0} overflow="hidden">
@@ -978,6 +1008,205 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         ...rerunProblems.map((p, i) => note(`rerun-problem:${i}`, '!', p, C.dirty)),
       )
       return parts
+    }
+
+    // ── the run's Results: approvals, summaries, charts, tables ──
+
+    async function resultsCard(run: Run, wf: Workflow): Promise<RenderChildren> {
+      const ctx = outputContext(run)
+      const specs = outputSpecs(wf)
+      const declared = new Map<string, (typeof specs)[number]>()
+      for (const o of specs) {
+        const rel = fillOutputPath(o.file, ctx)
+        if (rel && !declared.has(rel)) declared.set(rel, o)
+      }
+      const summaries: { rel: string; abs: string; text?: string; problem?: string }[] = []
+      const tables: { rel: string; abs: string; table?: Table; problem?: string }[] = []
+      const charts: { key: string; title: string; abs?: string; data?: ChartData; problem?: string }[] = []
+      for (const rel of outputCandidates(run, wf)) {
+        const abs = `${run.dir}/${rel}`
+        const ext = (rel.split('.').pop() ?? '').toLowerCase()
+        const chart = declared.get(rel)?.chart
+        const isMd = ext === 'md' || ext === 'markdown'
+        if (!isMd && !chart && ext !== 'csv' && ext !== 'tsv') continue
+        if (!(await $.fs.exists(abs).catch(() => false))) continue
+        const got = await readResult($, abs)
+        if (isMd) summaries.push({ rel, abs, ...got })
+        else if (chart) {
+          const title = declared.get(rel)?.title || baseName(rel)
+          const parsed = got.text === undefined ? { problem: got.problem } : tableOf(got.text, rel)
+          const made = parsed.table ? chartFromTable(parsed.table, chart, title) : { problem: parsed.problem }
+          charts.push({ key: `out:${rel}`, title, abs, ...made })
+        } else {
+          const parsed = got.text === undefined ? { problem: got.problem } : tableOf(got.text, rel)
+          tables.push({ rel, abs, ...parsed })
+        }
+      }
+      // `*.chart.json` files the run wrote (flow.chart), top level only.
+      const listed = [...(await $.fs.list(run.dir).catch(() => []))].filter(en => en.kind === 'file' && en.name.endsWith('.chart.json')).sort((a, b) => a.name.localeCompare(b.name))
+      for (const en of listed) {
+        const abs = `${run.dir}/${en.name}`
+        const name = en.name.replace(/\.chart\.json$/, '')
+        const got = await readResult($, abs)
+        charts.push({ key: `json:${en.name}`, title: name, abs, ...(got.text === undefined ? { problem: got.problem } : chartFromJson(got.text, name)) })
+      }
+      const approvals = wf.steps.filter(s => s.kind === 'approve')
+
+      // Summaries and tables fold; all but the first two start folded.
+      const blocks = [...summaries.map(x => x.rel), ...tables.map(x => x.rel)]
+      const folded = openResults[run.id] ?? blocks.slice(2)
+      const isOpen = (rel: string) => !folded.includes(rel)
+      const toggle = (rel: string) =>
+        void update($, hubOpenResults, all => {
+          const cur = all[run.id] ?? blocks.slice(2)
+          return { ...all, [run.id]: cur.includes(rel) ? cur.filter(r => r !== rel) : [...cur, rel] }
+        })
+
+      const sections: RenderChildren[] = []
+      const section = (title: string, count: number) => <Text key={`rsec:${title}`} size="caption" weight="bold" dimColor>{`${title.toUpperCase()}${count > 1 ? ` · ${count}` : ''}`}</Text>
+      if (approvals.length) sections.push(section('Approvals', approvals.length), ...approvals.map(spec => approvalRow(run, spec, run.steps.find(s => s.id === spec.id))))
+      if (summaries.length) sections.push(section('Summaries', summaries.length), ...summaries.map(x => summaryBlock(x, isOpen(x.rel), toggle)))
+      if (charts.length) sections.push(section('Charts', charts.length), ...charts.map(chartBlock))
+      if (tables.length) sections.push(section('Tables', tables.length), ...tables.map(x => tableBlock(x, isOpen(x.rel), toggle)))
+      if (!sections.length) return null
+      return card('results', [heading('Results'), ...sections])
+    }
+
+    function viewLink(key: string, abs: string) {
+      return <Markdown key={key} text={`[View](${linkTarget(abs, cwd)})`} />
+    }
+
+    /** A folding block's head: ▾/▸ and the file (one press), its View link. */
+    function blockHead(rel: string, abs: string, isOpen: boolean, toggle: (rel: string) => void) {
+      return (
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+          <Box flexDirection="row" gap={1} alignItems="center" flexShrink={1} minWidth={0} overflow="hidden">
+            {fileIcon(baseName(rel), false)}
+            <Box flexShrink={1} minWidth={0} overflow="hidden">
+              <Button key={`res:${rel}`} plain onPress={() => toggle(rel)}>
+                <Text dimColor>{isOpen ? '▾ ' : '▸ '}</Text>
+                <Text weight="semibold" wrap="truncate-end">{rel}</Text>
+              </Button>
+            </Box>
+          </Box>
+          {viewLink(`rview:${rel}`, abs)}
+        </Box>
+      )
+    }
+
+    function summaryBlock(x: { rel: string; abs: string; text?: string; problem?: string }, isOpen: boolean, toggle: (rel: string) => void) {
+      const lines = (x.text ?? '').replace(/\s+$/, '').split('\n')
+      let shown = lines.slice(0, SUMMARY_LINES).join('\n')
+      if (shown.length > SUMMARY_CHARS) shown = shown.slice(0, SUMMARY_CHARS)
+      const shownLines = shown.split('\n').length
+      const more = lines.length - shownLines
+      return (
+        <Box key={`sum:${x.rel}`} flexDirection="column" gap="xs" paddingX={isDesktop ? 1 : 0} paddingY={isDesktop ? 'xs' : 0} backgroundColor={isDesktop ? C.tile : undefined}>
+          {blockHead(x.rel, x.abs, isOpen, toggle)}
+          {isOpen && x.problem ? <Text dimColor size="footnote">{x.problem}</Text> : null}
+          {isOpen && !x.problem && !shown.trim() ? <Text dimColor size="footnote">Empty file</Text> : null}
+          {isOpen && shown.trim() ? <Markdown key={`md:${x.rel}`} text={shown} /> : null}
+          {isOpen && more > 0 ? <Text dimColor size="footnote">{`… ${plural(more, 'more line')}, View for all`}</Text> : null}
+        </Box>
+      )
+    }
+
+    function tableBlock(x: { rel: string; abs: string; table?: Table; problem?: string }, isOpen: boolean, toggle: (rel: string) => void) {
+      const t = x.table
+      return (
+        <Box key={`tbl:${x.rel}`} flexDirection="column" gap="xs" paddingX={isDesktop ? 1 : 0} paddingY={isDesktop ? 'xs' : 0} backgroundColor={isDesktop ? C.tile : undefined}>
+          {blockHead(x.rel, x.abs, isOpen, toggle)}
+          {t ? <Text dimColor size="footnote">{`${plural(t.rows.length, 'row')} × ${plural(t.header.length, 'column')}`}</Text> : <Text dimColor size="footnote">{`table: ${x.problem ?? 'unreadable'}`}</Text>}
+          {isOpen && t && t.header.length ? <Markdown key={`tblmd:${x.rel}`} text={tableMarkdown(t)} /> : null}
+        </Box>
+      )
+    }
+
+    function chartBlock(c: { key: string; title: string; abs?: string; data?: ChartData; problem?: string }) {
+      const drawn = c.data ? drawnPart(c.data) : undefined
+      const w = Math.max(160, Math.round(px - 40))
+      let body: RenderChildren
+      if (!drawn) body = <Text dimColor size="footnote">{`chart: ${c.problem ?? 'nothing to draw'}`}</Text>
+      else if (Svg) body = <Svg source={chartSvg(drawn.data, w)} alt={chartAlt(drawn.data)} width={w} isInteractive />
+      else {
+        const { rows, left } = textBars(drawn.data, Math.max(20, width - 4))
+        body = (
+          <Box flexDirection="column">
+            {drawn.data.series.length > 1
+              ? (
+                  <Text>
+                    {drawn.data.series.map((s, j) => <Text key={`lg:${c.key}:${j}`}>{j ? '  ' : ''}<Text color={SERIES[j]}>■</Text>{` ${s.name}`}</Text>)}
+                  </Text>
+                )
+              : null}
+            {rows.map((r, i) => (
+              <Text key={`tb:${c.key}:${i}`}>
+                {`${r.label} `}
+                <Text color={r.color}>{r.bar}</Text>
+                {` ${r.value}`}
+              </Text>
+            ))}
+            {left ? <Text dimColor>{`… ${left} more ${drawn.data.type === 'line' ? 'earlier' : ''}`.trimEnd()}</Text> : null}
+          </Box>
+        )
+      }
+      const sub = drawn?.data.yLabel
+      return (
+        <Box key={`chart:${c.key}`} flexDirection="column" gap="xs">
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+            <Box flexDirection="column" flexShrink={1} minWidth={0} overflow="hidden">
+              <Text weight="semibold" wrap="truncate-end">{drawn?.data.title ?? c.title}</Text>
+              {sub ? <Text dimColor size="footnote" wrap="truncate-end">{sub}</Text> : null}
+            </Box>
+            {c.abs ? viewLink(`cview:${c.key}`, c.abs) : null}
+          </Box>
+          {body}
+          {drawn?.left.map((l, i) => <Text key={`left:${c.key}:${i}`} dimColor size="footnote">{l}</Text>)}
+        </Box>
+      )
+    }
+
+    /** One approve step: its question, the decision, when, the note, and Approve / Reject while it waits. */
+    function approvalRow(run: Run, spec: StepSpec, step: StepRun | undefined) {
+      const status = step?.status ?? 'pending'
+      const decision =
+        status === 'done' ? { label: 'approved', color: C.add }
+          : status === 'failed' ? { label: 'rejected', color: C.del }
+            : status === 'waiting' ? { label: 'waiting', color: C.dirty }
+              : status === 'cancelled' ? { label: 'cancelled', color: C.dim }
+                : { label: 'not reached', color: C.dim }
+      const isWaiting = status === 'waiting'
+      const filled = fill(spec.body, outputContext(run)).trim()
+      const tail = (step?.tail ?? '').trim()
+      const logFirst = firstLine(tail)
+      const question = !step?.startedAt || !logFirst || firstLine(filled) === logFirst ? filled || logFirst : isWaiting ? tail : logFirst
+      const isDecided = status === 'done' || status === 'failed'
+      const output = (step?.output ?? '').trim()
+      const remark = isDecided && output && output !== 'approved' && output !== 'rejected' ? output : ''
+      const when = isDecided && step?.endedAt ? ago(step.endedAt, now) : isWaiting && step?.startedAt ? `asked ${ago(step.startedAt, now)}` : ''
+      return (
+        <Box key={`appr:${spec.id}`} flexDirection="column" gap="xs" paddingX={isDesktop ? 1 : 0} paddingY={isDesktop ? 'xs' : 0} backgroundColor={isDesktop ? (isWaiting ? tint(C.dirty, '14') : C.tile) : undefined}>
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+            <Box flexShrink={1} minWidth={0} overflow="hidden">
+              <Text size="footnote" weight="bold" color={isWaiting ? C.dirty : undefined} dimColor={!isWaiting} wrap="truncate-end">{isWaiting ? `WAITING FOR YOU · ${spec.title.toUpperCase()}` : spec.title.toUpperCase()}</Text>
+            </Box>
+            <Box flexDirection="row" gap={1} alignItems="center" flexShrink={0}>
+              {pill(decision.label, decision.color)}
+              {when ? <Text dimColor size="footnote">{when}</Text> : null}
+            </Box>
+          </Box>
+          <Text weight="semibold" dimColor={status === 'pending' || status === 'skipped' || status === 'cancelled'}>{question}</Text>
+          {remark ? <Text dimColor size="footnote">{`Note: ${remark}`}</Text> : null}
+          {isWaiting
+            ? (
+                <Box flexDirection="row" gap={1}>
+                  <Button key={`approve:${spec.id}`} variant="primary" onPress={() => void decideStep($, run.id, spec.id, true)}>Approve</Button>
+                  <Button key={`reject:${spec.id}`} onPress={() => void decideStep($, run.id, spec.id, false)}>Reject</Button>
+                </Box>
+              )
+            : null}
+        </Box>
+      )
     }
 
     async function again(run: Run): Promise<void> {

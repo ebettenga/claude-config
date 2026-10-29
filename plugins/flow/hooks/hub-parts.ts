@@ -4,7 +4,7 @@
 
 import type { EngineInterface } from 'claude-code'
 
-import type { CatalogItem, HubCatalog, ItemRun, Run, RunStatus, StepKind, StepRun, StepSpec, StepStatus, Workflow } from '../types'
+import type { CatalogItem, HubCatalog, ItemRun, OutputSpec, Run, RunStatus, StepKind, StepRun, StepSpec, StepStatus, Workflow } from '../types'
 import { fill, isAIStep } from './spec'
 import type { TemplateContext } from './spec'
 import { BY_EXTENSION, BY_FILE_NAME, BY_FOLDER_NAME, ICON_FILE, ICON_FOLDER } from './icons'
@@ -283,17 +283,36 @@ export function lastRunLine(runs: Run[], workflowId: string, now: number): { tex
   }
 }
 
-/** The workflow's outputs, then each step's (per item), relative to the run folder. */
-export function outputCandidates(run: Run, wf: Workflow): string[] {
+/** The run's template values for `outputs:` paths (no {{steps.<id>.files}}). */
+export function outputContext(run: Run): TemplateContext {
   const outputs: Record<string, string> = {}
   for (const s of run.steps) if (s.status === 'done') outputs[s.id] = s.output
-  const base: TemplateContext = { inputs: run.inputs, outputs, runDir: run.dir }
+  return { inputs: run.inputs, outputs, runDir: run.dir }
+}
+
+/** A workflow's top-level outputs as mappings: a run's older workflow.json holds plain paths. */
+export function outputSpecs(wf: Workflow): OutputSpec[] {
+  return (wf.outputs ?? []).flatMap((o: OutputSpec | string) => {
+    if (typeof o === 'string') return o.trim() ? [{ file: o, title: baseName(o) }] : []
+    return o && typeof o.file === 'string' && o.file.trim() ? [o] : []
+  })
+}
+
+/** An `outputs:` path filled for this run, relative to its folder; '' while it still has a template. */
+export function fillOutputPath(p: string, ctx: TemplateContext): string {
+  const rel = fill(p, ctx).trim().replace(/^\.\/+/, '')
+  return rel && !rel.includes('{{') ? rel : ''
+}
+
+/** The workflow's outputs, then each step's (per item), relative to the run folder. */
+export function outputCandidates(run: Run, wf: Workflow): string[] {
+  const base = outputContext(run)
   const paths: string[] = []
   const add = (p: string, item?: TemplateContext['item']) => {
-    const rel = fill(p, { ...base, item }).trim().replace(/^\.\/+/, '')
-    if (rel && !rel.includes('{{') && !paths.includes(rel)) paths.push(rel)
+    const rel = fillOutputPath(p, { ...base, item })
+    if (rel && !paths.includes(rel)) paths.push(rel)
   }
-  for (const p of wf.outputs) add(p)
+  for (const o of outputSpecs(wf)) add(o.file)
   for (const spec of wf.steps) {
     const step = run.steps.find(s => s.id === spec.id)
     if (!step || !spec.outputs?.length) continue

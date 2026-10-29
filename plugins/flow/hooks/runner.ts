@@ -648,13 +648,19 @@ const FLOW_PY = `"""The run's context for a flow python step; written by the flo
     flow.steps["fetch"].json         # an earlier step: .output .json .files .dir .status .exit
     flow.run_dir, flow.item, flow.item_index
     flow.set_output({"count": 3})    # this step's output (as JSON) instead of stdout
+    flow.chart("sales", "bar", labels=["a", "b"], series=[{"name": "total", "values": [3, 5]}])
+                                     # <run dir>/sales.chart.json, drawn in the hub's Results
 
 Standard library only.
 """
 import json
+import math
 import os
+import re
 
 __all__ = ["flow"]
+
+CHART_TYPES = ("bar", "line")
 
 
 class Step:
@@ -698,6 +704,40 @@ class Flow:
             raise RuntimeError("FLOW_OUTPUT is not set: run this from a flow python step")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(value, f, ensure_ascii=False)
+
+    def chart(self, name, type="bar", labels=(), series=(), title=None, y_label=None):
+        \"\"\"Writes <run dir>/<name>.chart.json, which the hub draws as a bar or line chart.
+
+        labels: one per bar or point; series: [{"name": str, "values": [number, ...]}],
+        one value per label. Returns the file's path.
+        \"\"\"
+        if type not in CHART_TYPES:
+            raise ValueError("chart type must be bar or line, not %r" % (type,))
+        labels = [str(x) for x in labels]
+        rows = []
+        for i, s in enumerate(series):
+            if not isinstance(s, dict) or "values" not in s:
+                raise ValueError("series[%d] must be a dict with name and values" % i)
+            values = []
+            for v in s["values"]:
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                    raise ValueError("series[%d] %r: %r is not a number" % (i, s.get("name", ""), v))
+                values.append(v)
+            if len(values) != len(labels):
+                raise ValueError("series[%d] has %d values for %d labels" % (i, len(values), len(labels)))
+            rows.append({"name": str(s.get("name") or "series %d" % (i + 1)), "values": values})
+        if not rows:
+            raise ValueError("a chart needs at least one series")
+        if not self.run_dir:
+            raise RuntimeError("no run folder: run this from a flow python step")
+        slug = re.sub(r"[^\\w]+", "-", str(name).lower()).strip("-_") or "chart"
+        data = {"type": type, "title": str(title or name), "labels": labels, "series": rows}
+        if y_label:
+            data["yLabel"] = str(y_label)
+        path = os.path.join(self.run_dir, slug + ".chart.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return path
 
 
 flow = Flow()
