@@ -283,7 +283,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         )
       return (
         <Box flexDirection="row" alignItems="center" gap={1} paddingBottom="xs">
-          {Svg ? <Svg source={logoSvg(28, C.pane)} alt="flow logo" width={28} height={28} /> : null}
+          {Svg ? <Svg source={logoSvg(28, C.pane, active.length > 0)} alt="flow logo" width={28} height={28} /> : null}
           <Text size="title" weight="bold">flow</Text>
           <Box flexGrow={1} />
           <Text dimColor size="footnote" weight="medium">{sub.toUpperCase()}</Text>

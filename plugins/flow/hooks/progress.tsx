@@ -338,7 +338,7 @@ const rowSvg = (f: Flow, W: number, isWorking: boolean): string => {
 @media (prefers-reduced-motion: reduce){.t0,.t1,.t2,.t3{animation:none}}
 </style>
 <defs><clipPath id="c"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/></clipPath></defs>
-${logoMark(rtl ? W - LOGO_PX : 0, (H - LOGO_PX) / 2, LOGO_PX)}
+${logoMark(rtl ? W - LOGO_PX : 0, (H - LOGO_PX) / 2, LOGO_PX, undefined, !f.isFinished)}
 <text class="t" ${titleAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(title)}</text>
 <g transform="translate(${rx(BAR_X, BAR_W)},${y0})">
 <rect class="k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_H / 2}"/>
@@ -369,7 +369,7 @@ const idleSvg = (W: number, status: string, isWorking: boolean): string => {
 .m{fill:#8a8a8a}.k{fill:#e4e4e2}
 @media (prefers-color-scheme: dark){.m{fill:#9a9a9a}.k{fill:#2c2c2c}}
 </style>
-${logoMark(rtl ? W - LOGO_PX : 0, (H - LOGO_PX) / 2, LOGO_PX)}
+${logoMark(rtl ? W - LOGO_PX : 0, (H - LOGO_PX) / 2, LOGO_PX, undefined, isWorking)}
 <text class="m" ${textAt} y="${H / 2 + 4.5}" font-family="${FONT}" font-size="13" font-weight="500">${xml(text)}</text>
 <rect class="k" x="${rx(BAR_X, BAR_W)}" y="${(H - BAR_H) / 2 + 5}" width="${BAR_W}" height="${BAR_H - 10}" rx="${(BAR_H - 10) / 2}"/>
 ${CRAB_CSS}${crab(rx(W - CRAB_W + 1, CRAB_BOX * 0.8), 0, 'other', !isWorking, isWorking, 0.8, rtl)}
