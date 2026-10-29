@@ -246,7 +246,14 @@ async function viewCall($: $, c: ViewCall, ctx: Record<string, unknown>): Promis
   const out = r.content.map(b => ('text' in b && typeof b.text === 'string' ? b.text : '')).join('')
   if (r.isError) throw new Error(out.trim().split('\n')[0] || `${c.server} ${c.tool} failed`)
   if (out.length > VIEW_RESULT_MAX) throw new Error(`${c.tool} answered ${Math.round(out.length / 1000)} kB, too much to show: trim it in the tool (no full: true)`)
-  return parseResult(out)
+  // Claude Code keeps a result over its size limit in a file and answers with a note about it.
+  if (/exceeds maximum allowed tokens|Output has been saved to/i.test(out.slice(0, 400)))
+    throw new Error(`${c.tool} answered more than Claude Code passes on: ask for less (fields, omit, max_items, a smaller limit)`)
+  const value = parseResult(out)
+  // JSON that does not parse was cut short on the way: say so, rather than draw an empty page.
+  if (typeof value === 'string' && /^\s*[[{]/.test(value))
+    throw new Error(`${c.tool}'s answer (${Math.round(out.length / 1000)} kB) was cut short: ask for less (fields, omit, a smaller limit)`)
+  return value
 }
 
 const viewError = (err: unknown, c: ViewCall) => {

@@ -1453,3 +1453,21 @@ test('views: a call auto mode refuses says which allow rule lets it through', as
   const out = await call($, 'open_view', { id: 'people', query: 'x' })
   expect(out).toContain('Add "mcp__crm__search_people" to permissions.allow')
 })
+
+test('views: a result Claude Code kept in a file is an error that says to ask for less', async ($, on) => {
+  world(on, {
+    files: { [`${FLOWS}/people/view.yaml`]: PEOPLE },
+    mcp: () => ({ content: [{ type: 'text', text: 'Error: result (107,443 characters) exceeds maximum allowed tokens. Output has been saved to /x.txt' }], isError: false }),
+  })
+  await begin($)
+  expect(await call($, 'open_view', { id: 'people', query: 'x' })).toContain('ask for less')
+})
+
+test('views: JSON cut short on the way is an error, not an empty page', async ($, on) => {
+  world(on, {
+    files: { [`${FLOWS}/people/view.yaml`]: PEOPLE },
+    mcp: () => ({ content: [{ type: 'text', text: '{"people": [{"id": 7, "name": "Sa' }], isError: false }),
+  })
+  await begin($)
+  expect(await call($, 'open_view', { id: 'people', query: 'x' })).toContain('was cut short')
+})

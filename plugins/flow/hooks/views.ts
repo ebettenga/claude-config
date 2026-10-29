@@ -37,7 +37,7 @@ import { load } from './vendor/js-yaml.mjs'
 import type { FoundView, ViewAction, ViewCall, ViewChart, ViewField, ViewFilter, ViewRange, ViewRows, ViewSection, ViewSpec, ViewStat, ViewTab, ViewTable } from '../types'
 
 export const VIEW_FILE = 'view.yaml'
-export const VIEW_FILTERS = ['percent', 'money', 'number', 'minutes', 'duration', 'date', 'datetime', 'join', 'count', 'lower', 'upper', 'words', 'yesno', 'default', 'clip'] as const
+export const VIEW_FILTERS = ['percent', 'money', 'number', 'minutes', 'duration', 'date', 'datetime', 'join', 'count', 'lower', 'upper', 'words', 'yesno', 'default', 'clip', 'map'] as const
 const ID_RE = /^[a-z0-9][a-z0-9_-]*$/
 const CALL_NAME_RE = /^[a-z][a-z0-9_]*$/
 /** Names a detail call may not take: they are the template's own. */
@@ -113,6 +113,15 @@ function applyFilter(value: unknown, name: string, arg: string | undefined): unk
     case 'words':
       // snake_case or SHOUTING to words: active_listener -> Active listener.
       return typeof value === 'string' && value ? (value.replace(/[_-]+/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase())) : value
+    case 'map': {
+      // map:'3=Approved,7=Ungraded': a label for each value; others stay as they are.
+      if (value === undefined || value === null) return value
+      for (const pair of (arg ?? '').split(',')) {
+        const i = pair.indexOf('=')
+        if (i > 0 && pair.slice(0, i).trim() === String(value)) return pair.slice(i + 1).trim()
+      }
+      return value
+    }
     case 'clip': {
       const max = Number(arg ?? 80)
       return typeof value === 'string' && value.length > max ? `${value.slice(0, Math.max(1, max - 1)).trimEnd()}…` : value

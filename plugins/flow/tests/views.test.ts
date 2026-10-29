@@ -211,6 +211,7 @@ test('forms: defaults fill from the page; values type for the call; required bla
   expect(values).toEqual({ name: 'Acme', is_test: 'true', tier: '' })
   expect(formValues(action.fields, { ...values, tier: '2' })).toEqual({ name: 'Acme', is_test: true, tier: 2 })
   expect(missingFields(action.fields, { name: ' ' })).toEqual(['Name'])
+  expect(fillView("{{g | map:'3=Approved,7=Ungraded'}} {{h | map:'3=Approved'}}", { g: 7, h: 'x' })).toBe('Ungraded x')
   expect(fillView('{{a | words}} {{b | count}} {{c | duration}} {{d | clip:5}}', { a: 'active_listener', b: [1, 2], c: 3725, d: 'abcdefgh' })).toBe('Active listener 2 1:02:05 abcd…')
 })
 
