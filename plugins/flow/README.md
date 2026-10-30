@@ -28,11 +28,11 @@ The plugin ships:
 
 - `/flow:flow <task>`: run the orchestrator on a task.
 - `/flow-agents`: show or hide the Agents tab of the flow chart (the bar's `×N` button does the same).
-- `/flow`: the hub: Workflows, Runs, Agents (every subagent of the session, running, finished and planned) and Skills.
+- `/flow-board`: the hub: Workflows, Runs, Agents (every subagent of the session, running, finished and planned) and Skills.
 
 ## Workflows
 
-`/flow` lists and runs workflows defined in `flow.yaml` files. See the flows repo README for the format.
+`/flow-board` lists and runs workflows defined in `flow.yaml` files. See the flows repo README for the format.
 
 ## Credits
 

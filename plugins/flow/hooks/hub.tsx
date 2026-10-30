@@ -1,4 +1,4 @@
-// The /flow hub pane: the workflows (find, read, fill in and run one),
+// The /flow-board hub pane: the workflows (find, read, fill in and run one),
 // their runs (a live step chart, logs, approvals, outputs) and everything
 // Claude can use (workflows, skills, agents). Laid out after
 // design/flow-chart-mockup.png; the terminal draws the same content as rows.
@@ -181,7 +181,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
   // The command is registered and the env checked from the runner's
   // session.start (hubSessionStart), and a run opens the pane from startRun.
 
-  on('command.run', { command: 'flow' }, async ($, e) => {
+  on('command.run', { command: 'flow-board' }, async ($, e) => {
     const found = await refresh($)
     const id = (e.args ?? '').trim()
     const hit = id ? found.find(f => f.id === id && f.workflow) : undefined
