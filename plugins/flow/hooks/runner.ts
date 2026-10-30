@@ -1003,9 +1003,6 @@ const FLOW_PY = `"""The run's context for a flow python step; written by the flo
     flow.set_output({"count": 3})    # this step's output (as JSON) instead of stdout
     flow.chart("sales", "bar", labels=["a", "b"], series=[{"name": "total", "values": [3, 5]}])
                                      # <run dir>/sales.chart.json, drawn in the hub's Results
-    flow.button("Install Docker", "jamfselfservice://content?entity=policy&id=12&action=execute",
-                note="Needed by the repo health check", group="Optional")
-                                     # a button in the hub's Results (jamfselfservice: or https: links)
 
 Standard library only.
 """
@@ -1017,7 +1014,6 @@ import re
 __all__ = ["flow"]
 
 CHART_TYPES = ("bar", "line")
-BUTTON_SCHEMES = ("jamfselfservice:", "selfservice:", "https:")
 
 
 class Step:
@@ -1094,30 +1090,6 @@ class Flow:
         path = os.path.join(self.run_dir, slug + ".chart.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        return path
-
-    def button(self, label, url, note="", group=""):
-        \"\"\"Adds a button to <run dir>/buttons.json, which the hub draws in the run's Results.
-
-        A press opens url: a jamfselfservice: link (a Jamf Self Service policy) or an
-        https: page; the hub opens no other kind. Buttons sit under their group, in the
-        order added. Returns the file's path.
-        \"\"\"
-        url = str(url).strip()
-        if not url.lower().startswith(BUTTON_SCHEMES):
-            raise ValueError("a button opens a jamfselfservice: or https: link, not %r" % (url,))
-        if not str(label).strip():
-            raise ValueError("a button needs a label")
-        if not self.run_dir:
-            raise RuntimeError("no run folder: run this from a flow python step")
-        path = os.path.join(self.run_dir, "buttons.json")
-        buttons = []
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
-                buttons = json.load(f)
-        buttons.append({"label": str(label).strip(), "url": url, "note": str(note or ""), "group": str(group or "")})
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(buttons, f, ensure_ascii=False, indent=2)
         return path
 
 

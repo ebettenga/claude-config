@@ -135,13 +135,7 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
     throw new Error(`no such file: ${e.path}`)
   })
   const ran = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
-  const opened: string[] = []
   on('process.run', (_, e) => {
-    // A run button: open <url>.
-    if (e.argv[0] === 'open') {
-      opened.push(e.argv[1] ?? '')
-      return ran('')
-    }
     // Spotlight: mdfind -onlyin <home> '<expr>', answered from the files in memory.
     if (e.argv[0] === 'mdfind') {
       const expr = e.argv[3] ?? ''
@@ -187,7 +181,7 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   const runIds = (wf: string) => [...fs.keys()].filter(k => k.startsWith(`${RUNS}/${wf}/`) && k.endsWith('/run.json')).map(k => k.split('/').slice(-2)[0] ?? '')
   const runFile = (wf: string, id: string) => JSON.parse(fs.get(`${RUNS}/${wf}/${id}/run.json`) ?? 'null') as Run
-  return { clock, fs, procs, fills, panes, runIds, runFile, opened }
+  return { clock, fs, procs, fills, panes, runIds, runFile }
 }
 
 async function begin($: Engine, surface: (typeof SURFACES)[number]) {
@@ -672,39 +666,6 @@ for (const surface of SURFACES) {
     all = await texts(ui)
     expect(all).not.toContain('WAITING FOR YOU')
     expect(all).not.toMatch(/not reached/i)
-    await ui.unmount()
-  })
-
-  test(`Results: buttons.json draws grouped buttons that open their links, and refuses other links (${surface})`, { timeoutMs: 20_000 }, async ($, on) => {
-    const w = world(on, { [`${FLOWS}/results/flow.yaml`]: RESULTS })
-    await begin($, surface)
-    const { result } = (await $.tool.call({ tool: 'mcp__flow__run_workflow', id: 'results', inputs: {} } as never)) as { result: string }
-    const id = /^Started run (\S+)\./.exec(result)?.[1] ?? ''
-    const dir = `${RUNS}/results/${id}`
-    await w.clock.settle()
-    const jamf = 'jamfselfservice://content?entity=policy&id=7&action=execute'
-    w.fs.set(`${dir}/buttons.json`, JSON.stringify([
-      { label: 'Install Python', url: jamf, note: 'Every python step', group: 'Required' },
-      { label: 'Install Docker', url: 'jamfselfservice://content?entity=policy&id=9&action=execute', group: 'Optional' },
-      { label: 'Docker docs', url: 'https://docs.docker.com', group: 'Optional' },
-      { label: 'Run a script', url: 'file:///tmp/x.sh', group: 'Optional' },
-      { label: 'Shell', url: 'x-apple.systempreferences:', group: 'Optional' },
-    ]))
-    w.procs[0]?.finish(0)
-    await w.clock.settle()
-    const ui = await $.ui.mount({ ...PANE, surface })
-    const all = await texts(ui)
-    expect(all).toContain('REQUIRED')
-    expect(all).toContain('OPTIONAL · 2')
-    expect(all).toContain('Every python step')
-    expect(all).toContain('button "Run a script": only jamfselfservice: and https: links open')
-    expect(all).toContain('button "Shell": only jamfselfservice: and https: links open')
-    expect(await ui.find({ type: 'Button', key: 'btnp:Optional:2' })).toBeFalsy()
-
-    await ui.press({ key: 'btnp:Required:0' })
-    await ui.press({ key: 'btnp:Optional:1' })
-    await w.clock.settle()
-    expect(w.opened).toEqual([jamf, 'https://docs.docker.com'])
     await ui.unmount()
   })
 

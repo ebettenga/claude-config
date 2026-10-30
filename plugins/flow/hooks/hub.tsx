@@ -8,7 +8,6 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { ChartData, Found, FoundView, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, ViewAction, ViewSection, ViewSpec, ViewState, Workflow } from '../types'
 import { LOGO_TEXT_PARTS, logoSvg } from './brand'
-import { BUTTONS_FILE, buttonsFromJson, groupButtons, isOpenable, type RunButton } from './buttons'
 import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
 import type { Table } from './charts'
 import { findFolders, findOnMac, pastPicks, recentRunFiles, rememberPick, rememberedValues, type SuggestedFile } from './file-finder'
@@ -1755,10 +1754,6 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         const got = await readResult($, abs)
         charts.push({ key: `json:${en.name}`, title: name, abs, ...(got.text === undefined ? { problem: got.problem } : chartFromJson(got.text, name)) })
       }
-      // `buttons.json` (flow.button): rows under their groups, each opening its link.
-      const buttonsAbs = `${run.dir}/${BUTTONS_FILE}`
-      const pressed = (await $.fs.exists(buttonsAbs).catch(() => false)) ? await readResult($, buttonsAbs) : undefined
-      const buttons = pressed === undefined ? { buttons: [], problems: [] } : pressed.text === undefined ? { buttons: [], problems: [`${BUTTONS_FILE}: ${pressed.problem}`] } : buttonsFromJson(pressed.text)
       const approvals = wf.steps.filter(s => s.kind === 'approve')
 
       // Summaries and tables fold; all but the first two start folded.
@@ -1774,29 +1769,11 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const sections: RenderChildren[] = []
       const section = (title: string, count: number) => <Text key={`rsec:${title}`} size="caption" weight="bold" dimColor>{`${title.toUpperCase()}${count > 1 ? ` · ${count}` : ''}`}</Text>
       if (approvals.length) sections.push(section('Approvals', approvals.length), ...approvals.map(spec => approvalRow(run, spec, run.steps.find(s => s.id === spec.id))))
-      for (const g of groupButtons(buttons.buttons)) sections.push(section(g.group || 'Actions', g.buttons.length), ...g.buttons.map((b, i) => buttonRow(b, `${g.group}:${i}`)))
-      sections.push(...buttons.problems.map((p, i) => <Text key={`bprob:${i}`} dimColor size="footnote">{p}</Text>))
       if (summaries.length) sections.push(section('Summaries', summaries.length), ...summaries.map(x => summaryBlock(x, isOpen(x.rel), toggle)))
       if (charts.length) sections.push(section('Charts', charts.length), ...charts.map(chartBlock))
       if (tables.length) sections.push(section('Tables', tables.length), ...tables.map(x => tableBlock(x, isOpen(x.rel), toggle)))
       if (!sections.length) return null
       return card('results', [heading('Results'), ...sections])
-    }
-
-    /** One flow.button: its label and note, and the button that opens its link (checked again as it opens). */
-    function buttonRow(b: RunButton, key: string) {
-      const press = () => {
-        if (!isOpenable(b.url)) return void $.ui.toast(`Not opened: ${b.label} has a link flow does not open`)
-        void $.process.run(['open', b.url], { timeoutMs: 10_000 })
-          .then(r => (r.exitCode === 0 ? undefined : $.ui.toast(`Could not open ${b.label}${b.url.startsWith('https:') ? '' : ': is Jamf Self Service installed?'}`)))
-          .catch(() => $.ui.toast(`Could not open ${b.label}`))
-      }
-      return (
-        <Box key={`btn:${key}`} flexDirection="row" alignItems="center" gap={1}>
-          <Button key={`btnp:${key}`} onPress={press}>{b.label}</Button>
-          {b.note ? <Box flexShrink={1} minWidth={0}><Text dimColor size="footnote" wrap="wrap">{b.note}</Text></Box> : null}
-        </Box>
-      )
     }
 
     function viewLink(key: string, abs: string) {
