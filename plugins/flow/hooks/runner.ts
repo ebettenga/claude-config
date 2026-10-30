@@ -2111,7 +2111,7 @@ async function registerTools($: $): Promise<void> {
     description:
       `Start a run of a saved flow workflow by its id (from list_workflows). ${where} ` +
       'Inputs are strings keyed by input id; inputs left out take their defaults. Returns the run id, or the problems (missing required inputs, unset env variables, missing files) and nothing starts. ' +
-      'The run goes on in the background; the user watches it in /flow-chart and you can check it with run_status.',
+      'The run goes on in the background; the user watches it in /flow and you can check it with run_status.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2168,14 +2168,14 @@ async function registerTools($: $): Promise<void> {
   await $.tool.register({
     name: 'list_views',
     description:
-      `List the flow views the user can open on the /flow-chart Views tab. A view (view.yaml, beside workflows in ${workflowsDir} and its sources) is a search, a list and a detail page over MCP tool calls, such as a team's listener or customer lookup. ` +
+      `List the flow views the user can open on the /flow Views tab. A view (view.yaml, beside workflows in ${workflowsDir} and its sources) is a search, a list and a detail page over MCP tool calls, such as a team's listener or customer lookup. ` +
       'Returns JSON: id, source, title, description, whether it has a search, its filters, its detail sections, and errors. Use it before open_view.',
     inputSchema: { type: 'object', properties: {} },
   })
   await $.tool.register({
     name: 'open_view',
     description:
-      'Open a flow view on the /flow-chart Views tab for the user. With query (and optionally filter), it runs the view\'s search and returns the rows it found with their keys. ' +
+      'Open a flow view on the /flow Views tab for the user. With query (and optionally filter), it runs the view\'s search and returns the rows it found with their keys. ' +
       'With key, it opens that item\'s detail page and returns what the page shows as text (each section\'s numbers and lines), so you can answer questions about it too. ' +
       'Use it when the user asks to look someone or something up in a view, e.g. "show me listener 4004" or "find listeners named Sam".',
     inputSchema: {
@@ -2275,7 +2275,7 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     const raw = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? (input.inputs as Record<string, unknown>) : {}
     const { run, problems } = await startRun($, str(input.id), raw)
     if (!run) return { result: `Not started:\n${problems.map(p => `- ${p}`).join('\n')}` }
-    return { result: `Started run ${run}. Watch it in /flow-chart, or check it with run_status.\n\n${await runStatusText($, run)}` }
+    return { result: `Started run ${run}. Watch it in /flow, or check it with run_status.\n\n${await runStatusText($, run)}` }
   })
 
   on('tool.call', { tool: 'mcp__flow__run_status' }, async ($, e) => ({ result: await runStatusText($, str((e as unknown as { run?: unknown }).run)) }))
@@ -2360,7 +2360,7 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     if (!list || list.state !== 'ok') return { result: `error: ${list?.state === 'error' ? list.message : 'the search did not run'}` }
     const { items, total } = list.value as { items: unknown[]; total: number }
     const rows = items.map(item => `- ${getPath(item, view.list.key)}: ${fillView(view.list.rows.text, { item })}${view.list.rows.subtitle ? ` (${fillView(view.list.rows.subtitle, { item })})` : ''}`)
-    return { result: [`${total} found${total > items.length ? `, showing ${items.length}` : ''}. Opened in /flow-chart. Keys first; open_view with key opens one.`, ...rows].join('\n') }
+    return { result: [`${total} found${total > items.length ? `, showing ${items.length}` : ''}. Opened in /flow. Keys first; open_view with key opens one.`, ...rows].join('\n') }
   })
 
   on('tool.call', { tool: 'mcp__flow__validate_workflow' }, async ($, e) => ({ result: await validateText($, str((e as unknown as { path?: unknown }).path)) }))

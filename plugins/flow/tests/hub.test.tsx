@@ -186,7 +186,7 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
 
 async function begin($: Engine, surface: (typeof SURFACES)[number]) {
   await $.session.start({ cwd: '/repo', surface, isInteractive: true } as never)
-  await $.command.run({ command: 'flow-chart', args: '' })
+  await $.command.run({ command: 'flow', args: '' })
 }
 
 const texts = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string }[]> }) => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
@@ -483,15 +483,15 @@ for (const surface of SURFACES) {
   })
 }
 
-test('/flow-chart <id> opens that workflow', async ($, on) => {
+test('/flow <id> opens that workflow', async ($, on) => {
   world(on, { [`${FLOWS}/csv/flow.yaml`]: CSV })
   await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-  const opened = (await $.command.run({ command: 'flow-chart', args: 'csv' })) as { text: string }
+  const opened = (await $.command.run({ command: 'flow', args: 'csv' })) as { text: string }
   expect(opened.text).toBe('Flow chart opened.')
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Button', key: 'run-workflow' })).toBeTruthy()
   await ui.unmount()
-  const missing = (await $.command.run({ command: 'flow-chart', args: 'ghost' })) as { text: string }
+  const missing = (await $.command.run({ command: 'flow', args: 'ghost' })) as { text: string }
   expect(missing.text).toContain('no workflow "ghost"')
 })
 
