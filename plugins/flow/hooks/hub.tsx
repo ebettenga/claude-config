@@ -615,18 +615,33 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           input = Input
             ? <Input key={`fv:${akey}:${f.id}`} value={v} placeholder={f.type === 'date' ? 'YYYY-MM-DD' : f.help ?? ''} {...(f.type === 'textarea' ? { rows: 4 } : {})} onInput={(x: string) => setValue(f.id, x)} onSubmit={(x: string) => setValue(f.id, x)} />
             : <Text key={`fi:${f.id}`}>{v || '—'}</Text>
+        // On desktop the fields sit two to a row: each takes just under half
+        // and grows, so an odd last field, and a textarea, spans the row.
+        const isWide = f.type === 'textarea' || (f.type === 'select' && !Select)
         return (
-          <Box key={`ff:${f.id}`} flexDirection="column">
+          <Box
+            key={`ff:${f.id}`}
+            flexDirection="column"
+            gap={isDesktop ? 'xs' : 0}
+            {...(isDesktop ? { width: isWide ? '100%' : '45%', flexGrow: 1, minWidth: 160 } : {})}
+          >
             {label}
             {input}
             {f.help && f.type !== 'text' ? <Text dimColor size="caption">{f.help}</Text> : null}
           </Box>
         )
       })
+      const grid = isDesktop
+        ? [<Box key="fg" flexDirection="row" flexWrap="wrap" columnGap="md" rowGap="sm">{fields}</Box>]
+        : fields
       const save = action.confirm
         ? <Button key={`vasv:${akey}`} variant="primary" onPress={() => void setState(view.id, s => (s.open?.key === akey ? { ...s, open: { ...s.open, isConfirming: true } } : s))}>Continue</Button>
         : <Button key={`vasv:${akey}`} variant="primary" disabled={open.isRunning} onPress={() => void viewAction($, view.id, action, ctx, open.values)}>{open.isRunning ? 'Saving…' : 'Save'}</Button>
-      return card(`vaf:${akey}`, [<Text key="t" weight="bold" bold>{action.label}</Text>, ...fields, <Box key="row" flexDirection="row" gap={1}>{save}{close}</Box>])
+      return card(`vaf:${akey}`, [
+        <Box key="t" paddingBottom={isDesktop ? 'xs' : 0}><Text weight="bold" bold>{action.label}</Text></Box>,
+        ...grid,
+        <Box key="row" flexDirection="row" gap={1} paddingTop={isDesktop ? 'xs' : 0}>{save}{close}</Box>,
+      ])
     }
 
     /** A row of action buttons, then the open one's form or confirm step under it. */
@@ -635,7 +650,8 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const open = actions.find(a => st.open?.key === `${prefix}:${a.id}`)
       return [
         <Box key={`var:${prefix}`} flexDirection="row" gap={1} flexWrap="wrap">{actions.map(a => actionButton(view, a, `${prefix}:${a.id}`, ctx))}</Box>,
-        open ? actionForm(view, st, open, `${prefix}:${open.id}`, ctx) : null,
+        // A little air between the buttons and the form they opened.
+        open ? <Box key={`vafw:${prefix}`} flexDirection="column" paddingTop={isDesktop ? 'xs' : 0}>{actionForm(view, st, open, `${prefix}:${open.id}`, ctx)}</Box> : null,
       ]
     }
 
