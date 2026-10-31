@@ -39,7 +39,7 @@ Secrets: list the variable names under `env:` and use `{{env.NAME}}` in python a
 2. Write `flow.yaml`, the scripts and the `README.md`.
 3. Call `mcp__flow__validate_workflow` with the folder, and fix problems until it says `valid`.
 4. If the user agrees, do a dry run with `mcp__flow__run_workflow` on sample inputs, follow it with `mcp__flow__run_status`, and read failing steps with `mcp__flow__step_log`.
-5. Tell the user it is in `/flow-board`, and say how many of its steps are AI and how many are fixed.
+5. Tell the user it is in `/workflow`, and say how many of its steps are AI and how many are fixed.
 
 ## Hardening ("make it deterministic")
 

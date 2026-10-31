@@ -327,7 +327,7 @@ export type Run = {
 }
 
 // ---------------------------------------------------------------------------
-// The /flow-board hub pane (hooks/hub.tsx).
+// The /workflow hub pane (hooks/hub.tsx).
 
 export type HubTab = 'workflows' | 'views' | 'runs' | 'agents' | 'skills'
 
