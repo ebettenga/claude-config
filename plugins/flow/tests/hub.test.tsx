@@ -876,3 +876,90 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 }
+
+const PICK = `
+title: Client report
+description: One client's report.
+inputs:
+  - id: client
+    label: Client
+    type: text
+    search:
+      mcp: { server: kh, tool: search_clients, args: { search: "{{query}}", limit: 5 } }
+      items: clients
+      value: "{{item.id}}"
+      title: "{{item.name}}"
+      subtitle: "#{{item.id}} · {{item.status}}"
+steps:
+  - id: report
+    title: Report
+    run: echo report
+`
+
+for (const surface of SURFACES) {
+  test(`a search input: typing asks the MCP tool, a pick fills the id, and Run uses it (${surface})`, async ($, on) => {
+    const w = world(on, { [`${FLOWS}/pick/flow.yaml`]: PICK })
+    const calls: Record<string, unknown>[] = []
+    on('mcp.call', (_, e) => {
+      calls.push(e.args)
+      const all = [
+        { id: 42, name: 'HKS, Inc.', status: 'active' },
+        { id: 43, name: 'HKS Labs', status: 'setup' },
+      ]
+      const q = String(e.args.search ?? '').toLowerCase()
+      const text = JSON.stringify({ clients: all.filter(c => c.name.toLowerCase().includes(q)) })
+      return { value: { content: [{ type: 'text', text }], isError: false } }
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'run:pick' })
+    // One letter is under the two it waits for: no call yet.
+    await ui.input({ key: 'in:pick:client:', text: 'h', kind: 'change' })
+    expect(calls).toEqual([])
+    await ui.input({ key: 'in:pick:client:', text: 'hks', kind: 'change' })
+    await w.clock.settle()
+    expect(calls).toEqual([{ search: 'hks', limit: 5 }])
+    expect(await ui.find({ type: 'Button', key: 'sopt:pick:client:42' })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'sopt:pick:client:43' })).toBeTruthy()
+    await ui.press({ key: 'sopt:pick:client:42' })
+    expect(await ui.find({ type: 'Text', text: /✓ HKS, Inc\. · #42 · active/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'sopt:pick:client:43' })).toBeFalsy()
+    await ui.press({ key: 'run-workflow' })
+    await w.clock.settle()
+    const [id] = w.runIds('pick')
+    expect(w.runFile('pick', id ?? '').inputs).toEqual({ client: '42' })
+    await ui.unmount()
+  })
+
+  test(`a search input with no match says so, and a failed search shows why (${surface})`, async ($, on) => {
+    const w = world(on, { [`${FLOWS}/pick/flow.yaml`]: PICK })
+    on('mcp.call', (_, e) =>
+      e.args.search === 'boom'
+        ? { value: { content: [{ type: 'text', text: 'backend down' }], isError: true } }
+        : { value: { content: [{ type: 'text', text: JSON.stringify({ clients: [] }) }], isError: false } },
+    )
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'run:pick' })
+    await ui.input({ key: 'in:pick:client:', text: 'zz', kind: 'change' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: /Nothing matches “zz”/ })).toBeTruthy()
+    await ui.input({ key: 'in:pick:client:', text: 'boom', kind: 'change' })
+    await w.clock.settle()
+    expect(await ui.find({ type: 'Text', text: /backend down/ })).toBeTruthy()
+    await ui.unmount()
+  })
+
+  test(`the board puts the inputs and Run above the description and the step chart (${surface})`, async ($, on) => {
+    world(on, { [`${FLOWS}/pick/flow.yaml`]: PICK })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'run:pick' })
+    const order = (await ui.findAll({})).map(el => el.key)
+    const at = (key: string) => order.indexOf(key)
+    expect(at('in:pick:client:')).toBeGreaterThan(-1)
+    expect(at('in:pick:client:')).toBeLessThan(at('run-workflow'))
+    expect(at('run-workflow')).toBeLessThan(at('desc:pick'))
+    await ui.unmount()
+  })
+}

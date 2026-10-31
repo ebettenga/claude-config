@@ -718,3 +718,40 @@ test('select inputs: multiple takes several values, remember takes new ones', ()
   expect(fixed.errors).toContain('inputs[1].remember: only select inputs take remember:')
   expect(inputProblems(fixed.workflow as Workflow, { c: 'red\ngreen', t: 'x' })).toEqual(['c: "green" must be one of red, blue'])
 })
+
+test('text inputs: search reads like a view list, and each problem is named', () => {
+  const ok = parse(`title: T
+inputs:
+  - id: client
+    search:
+      mcp: { server: kh, tool: find, args: { q: "{{query}}" } }
+      items: rows
+      value: "{{item.id}}"
+      title: "{{item.name}}"
+steps:
+  - id: s
+    run: echo
+`)
+  expect(ok.errors).toEqual([])
+  expect(ok.workflow?.inputs[0]?.search).toEqual({ call: { server: 'kh', tool: 'find', args: { q: '{{query}}' } }, items: 'rows', value: '{{item.id}}', title: '{{item.name}}', limit: 10, min: 2 })
+  const bad = errorsOf(`title: T
+inputs:
+  - id: a
+    type: select
+    options: [x]
+    search: { mcp: { server: kh, tool: find, args: { q: "{{query}}" } }, items: rows, value: "{{item.id}}" }
+  - id: b
+    search:
+      mcp: { server: kh, tool: find, args: { q: fixed } }
+      value: "{{row.id}}"
+      colour: red
+steps:
+  - id: s
+    run: echo
+`)
+  expect(bad).toContain('inputs[0].search: only text inputs take search:')
+  expect(bad).toContain('inputs[1].search.items: is empty (the path to the list in the result)')
+  expect(bad).toContain('inputs[1].search.mcp.args: none uses {{query}}, the text typed')
+  expect(bad).toContain('inputs[1].search: "{{row...}}" names nothing; use {{item.<field>}}')
+  expect(bad).toContain('inputs[1].search.colour: is not a field (mcp, items, value, title, subtitle, limit, min)')
+})

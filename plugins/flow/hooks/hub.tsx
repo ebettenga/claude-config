@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { ChartData, Found, FoundView, HubAttempts, HubCatalog, HubEnv, HubForms, HubOpenResults, HubPicker, HubTab, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, ViewAction, ViewSection, ViewSpec, ViewState, Workflow } from '../types'
+import type { ChartData, Found, FoundView, HubAttempts, HubCatalog, HubEnv, HubForms, HubInputSearch, HubOpenResults, HubPicker, HubTab, InputOption, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, ViewAction, ViewSection, ViewSpec, ViewState, Workflow } from '../types'
 import { LOGO_TEXT_PARTS, logoSvg } from './brand'
 import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
 import type { Table } from './charts'
@@ -53,7 +53,7 @@ import {
 import { checkEnv, openHub, showRun, showWorkflow } from './hub-state'
 import { SVG } from './icons'
 import { agentsView } from './progress'
-import { cancelRun, decideStep, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun, tabOf, tabRange, viewAction, viewOpen, viewRange, viewSearch, viewTab } from './runner'
+import { cancelRun, decideStep, inputPick, inputSearch, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun, tabOf, tabRange, viewAction, viewOpen, viewRange, viewSearch, viewTab } from './runner'
 import { activeFilters, fillView, formDefaults, getPath, pickRows, withFilter } from './views'
 import { OTHER, addGroup, arrange, moveGroup, moveWorkflow, removeGroup, renameGroup, setGroup } from './layout'
 import type { Section } from './layout'
@@ -83,6 +83,7 @@ const hubView = atom({ plugin: 'flow', key: 'hubView' } as const, '', { shape: '
 const viewsAtom = atom({ plugin: 'flow', key: 'views' } as const, [] as FoundView[], { shape: 'views-1' })
 const viewStatesAtom = atom({ plugin: 'flow', key: 'viewStates' } as const, {} as Record<string, ViewState>, { shape: 'view-states-1' })
 const hubForms = atom({ plugin: 'flow', key: 'hubForms' } as const, {} as HubForms, { shape: 'hub-forms-1' })
+const hubInputSearch = atom({ plugin: 'flow', key: 'hubInputSearch' } as const, {} as HubInputSearch, { shape: 'hub-input-search-1' })
 const hubPicker = atom({ plugin: 'flow', key: 'hubPicker' } as const, null as HubPicker | null, { shape: 'hub-picker-2' })
 const hubQuery = atom({ plugin: 'flow', key: 'hubQuery' } as const, '', { shape: 'hub-query-1' })
 const hubLogStep = atom({ plugin: 'flow', key: 'hubLogStep' } as const, '', { shape: 'hub-log-1' })
@@ -226,7 +227,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       read($, hubArrange),
       read($, hubFolded),
     ])
-    const [views, viewStates, viewId] = await Promise.all([read($, viewsAtom), read($, viewStatesAtom), read($, hubView)])
+    const [views, viewStates, viewId, searches] = await Promise.all([read($, viewsAtom), read($, viewStatesAtom), read($, hubView), read($, hubInputSearch)])
     const now = await $.clock.now()
     const cwd = await $.session.cwd().catch(() => '')
     const home = ((await $.env.get('HOME').catch(() => undefined)) ?? '').replace(/\/+$/, '')
@@ -1000,19 +1001,8 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const doneRun = runs.find(r => r.workflowId === wf.id && r.status === 'done')
       const fields: RenderChildren[] = []
       for (const input of wf.inputs) fields.push(await field(f, input))
-      return [
-        <Box flexDirection="row">
-          <Button key="back:workflows" plain onPress={() => void update($, hubWorkflow, () => '')}>
-            <Text dimColor weight="medium">‹ Workflows</Text>
-          </Button>
-        </Box>,
-        <Box flexDirection="column" gap="xs">
-          <Text size="title" weight="semibold">{wf.title}</Text>
-          <Text dimColor size="footnote">{[wf.owner, wf.tags.join(', '), `${fixed} fixed, ${ai} AI step${ai === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}</Text>
-          {wf.description ? <Markdown key={`desc:${wf.id}`} text={wf.description} /> : null}
-        </Box>,
-        // The actions sit under the title, so Run never needs a scroll to reach.
-        <Box flexDirection="row" gap={1} flexWrap="wrap">
+      const actions = (
+        <Box key="actions" flexDirection="row" gap={1} flexWrap="wrap" paddingTop={isDesktop && wf.inputs.length ? 'xs' : 0}>
           <Button key="run-workflow" variant="primary" onPress={() => void runWorkflow(wf)}>Run workflow</Button>
           <Button key="ask-change" onPress={() => fillPrompt(`Change the flow workflow "${wf.title}" (${tildify(f.dir, home)}/flow.yaml): `)}>Ask Claude to change it</Button>
           {ai > 0 && doneRun
@@ -1025,10 +1015,23 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
                 </Button>
               )
             : null}
+        </Box>
+      )
+      return [
+        <Box flexDirection="row">
+          <Button key="back:workflows" plain onPress={() => void update($, hubWorkflow, () => '')}>
+            <Text dimColor weight="medium">‹ Workflows</Text>
+          </Button>
         </Box>,
+        <Box flexDirection="column" gap="xs">
+          <Text size="title" weight="semibold">{wf.title}</Text>
+          <Text dimColor size="footnote">{[wf.owner, wf.tags.join(', '), `${fixed} fixed, ${ai} AI step${ai === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}</Text>
+        </Box>,
+        // The inputs come first, with Run right under them, so filling the form and running it is one place.
+        wf.inputs.length ? card('inputs', [heading('Inputs', String(wf.inputs.length)), ...fields, actions], {}) : actions,
         problems.length ? <Box flexDirection="column" gap="xs">{problems.map((p, i) => note(`problem:${i}`, '!', p, C.dirty))}</Box> : null,
+        wf.description ? <Markdown key={`desc:${wf.id}`} text={wf.description} /> : null,
         chartCard(wf),
-        wf.inputs.length ? card('inputs', [heading('Inputs', String(wf.inputs.length)), ...fields], {}) : null,
         wf.steps.some(s => s.kind === 'agent')
           ? note('agents-headless', 'i', 'Agent steps run a headless Claude with only the tools and folders the step lists: no commands, no MCP, writes only to the run folder (and its write: folders), stopped at its budget.', C.read)
           : null,
@@ -1169,6 +1172,10 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           break
         }
         default:
+          if (input.search) {
+            control = searchField(wf, input, value)
+            break
+          }
           control = Input
             ? <Input key={key} value={value} placeholder={input.type === 'date' ? 'YYYY-MM-DD' : ''} {...(input.type === 'textarea' ? { rows: 3 } : {})} onInput={(v: string) => void setValue(wf, input.id, v)} onSubmit={(v: string) => void setValue(wf, input.id, v)} />
             : <Text>{value || '—'}</Text>
@@ -1181,6 +1188,53 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           </Box>
           {input.help ? <Text dimColor size="footnote">{input.help}</Text> : null}
           {control}
+        </Box>
+      )
+    }
+
+    /**
+     * A text input with `search:`: what is typed goes to its MCP tool and the
+     * matches list under it; picking one puts its value in the input and shows
+     * its title. Typing again drops the pick, and text no option fills runs as typed.
+     */
+    function searchField(wf: Workflow, input: InputSpec, value: string) {
+      const min = input.search?.min ?? 0
+      const key = `${wf.id}:${input.id}`
+      const st = searches[key]
+      // A pick counts while the input still holds its value (a rerun's values may have replaced it).
+      const picked = st?.picked && st.picked.value === value ? st.picked : undefined
+      const typed = (raw: string) => {
+        void setValue(wf, input.id, raw)
+        if (st?.picked) void inputPick($, wf.id, input.id, undefined)
+        void inputSearch($, wf.id, input.id, raw)
+      }
+      const pick = (o: InputOption) => {
+        void setValue(wf, input.id, o.value)
+        void inputPick($, wf.id, input.id, o)
+      }
+      const shown = picked ? picked.title : value
+      const options = picked ? [] : (st?.options ?? [])
+      return (
+        <Box flexDirection="column" gap="xs">
+          {Input
+            ? <Input key={`in:${key}:${picked?.value ?? ''}`} value={shown} placeholder={min > 1 ? `Type ${min} or more letters to search` : 'Type to search'} onInput={typed} onSubmit={(v: string) => (v === shown && picked ? undefined : typed(v))} />
+            : <Text>{shown || '—'}</Text>}
+          {picked ? <Text color={C.add} size="footnote" weight="medium">{`✓ ${[picked.title, picked.subtitle].filter(Boolean).join(' · ')}`}</Text> : null}
+          {!picked && st?.state === 'loading' && !options.length ? <Text dimColor size="footnote">Searching…</Text> : null}
+          {!picked && st?.state === 'error' ? note(`serr:${key}`, '!', st.message ?? 'The search failed.', C.dirty) : null}
+          {!picked && st?.state === 'ok' && !options.length ? <Text dimColor size="footnote">{`Nothing matches “${st.query}”. It runs with the text as typed.`}</Text> : null}
+          {options.length
+            ? (
+                <Box flexDirection="column" borderStyle="round" borderColor={isDesktop ? C.border : 'gray'} backgroundColor={isDesktop ? C.field : undefined} paddingX={1}>
+                  {options.map(o => (
+                    <Button key={`sopt:${key}:${o.value}`} plain onPress={() => pick(o)}>
+                      <Text weight="medium" wrap="truncate-end">{o.title}</Text>
+                      {o.subtitle ? <Text dimColor size="footnote" wrap="truncate-end">{`  ${o.subtitle}`}</Text> : null}
+                    </Button>
+                  ))}
+                </Box>
+              )
+            : null}
         </Box>
       )
     }

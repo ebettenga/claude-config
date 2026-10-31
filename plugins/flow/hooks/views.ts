@@ -34,7 +34,7 @@
 // a call as a number.
 
 import { load } from './vendor/js-yaml.mjs'
-import type { FoundView, ViewAction, ViewCall, ViewChart, ViewField, ViewFilter, ViewRange, ViewRows, ViewSection, ViewSpec, ViewStat, ViewTab, ViewTable } from '../types'
+import type { FoundView, InputSearch, ViewAction, ViewCall, ViewChart, ViewField, ViewFilter, ViewRange, ViewRows, ViewSection, ViewSpec, ViewStat, ViewTab, ViewTable } from '../types'
 
 export const VIEW_FILE = 'view.yaml'
 export const VIEW_FILTERS = ['percent', 'money', 'number', 'minutes', 'duration', 'date', 'datetime', 'join', 'count', 'lower', 'upper', 'words', 'yesno', 'default', 'clip', 'map'] as const
@@ -403,6 +403,32 @@ function parseLimit(raw: unknown, at: string, errors: string[]): number {
   const limit = raw === undefined ? 25 : Number(raw)
   if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ROWS) errors.push(`${at}.limit: must be a whole number from 1 to ${MAX_ROWS}`)
   return Number.isInteger(limit) ? Math.min(MAX_ROWS, Math.max(1, limit)) : 25
+}
+
+/** A flow.yaml text input's `search:`, read like a view's list: a call with `{{query}}`, items, and templates for each. */
+export function parseInputSearch(raw: unknown, at: string, errors: string[]): InputSearch | undefined {
+  if (!isObj(raw)) return void errors.push(`${at}: must be a mapping (mcp, items, value, title)`)
+  const call = parseCall(raw.mcp, `${at}.mcp`, errors)
+  const items = str(raw.items)
+  if (!items) errors.push(`${at}.items: is empty (the path to the list in the result)`)
+  const value = str(raw.value)
+  if (!value) errors.push(`${at}.value: is empty (what a pick puts in the input, e.g. "{{item.id}}")`)
+  const title = str(raw.title) || value
+  const min = raw.min === undefined ? 2 : Number(raw.min)
+  if (!Number.isInteger(min) || min < 0 || min > 10) errors.push(`${at}.min: must be a whole number from 0 to 10`)
+  for (const k of Object.keys(raw)) if (!['mcp', 'items', 'value', 'title', 'subtitle', 'limit', 'min'].includes(k)) errors.push(`${at}.${k}: is not a field (mcp, items, value, title, subtitle, limit, min)`)
+  for (const t of [value, title, str(raw.subtitle)]) for (const r of roots(t)) if (r !== 'item') errors.push(`${at}: "{{${r}...}}" names nothing; use {{item.<field>}}`)
+  if (call && !deepStrings(call.args).some(a => roots(a).includes('query'))) errors.push(`${at}.mcp.args: none uses {{query}}, the text typed`)
+  if (!call) return undefined
+  return {
+    call,
+    items,
+    value,
+    title,
+    ...(str(raw.subtitle) ? { subtitle: str(raw.subtitle) } : {}),
+    limit: raw.limit === undefined ? 10 : parseLimit(raw.limit, at, errors),
+    min: Number.isInteger(min) ? Math.min(10, Math.max(0, min)) : 2,
+  }
 }
 
 const FIELD_TYPES = ['text', 'textarea', 'number', 'toggle', 'select', 'date'] as const
