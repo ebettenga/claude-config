@@ -832,9 +832,10 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         const wf = f.workflow
         return [wf.title, wf.description, wf.id, ...wf.tags].some(s => s.toLowerCase().includes(needle))
       })
-      // A search finds hidden workflows too; without one they wait in the Hidden section.
-      const hidden = needle ? [] : matches.filter(f => hiddenWhy(f.workflow))
-      const shown = needle ? matches : matches.filter(f => !hiddenWhy(f.workflow))
+      // A search finds hidden workflows too, and Arrange keeps each in its group so it can
+      // still be moved; otherwise they wait in the Hidden section.
+      const isHiding = !needle && !isArranging
+      const hidden = isHiding ? matches.filter(f => hiddenWhy(f.workflow)) : []
       const broken = found.filter(f => f.errors.length)
       const search = Input ? (
         <Box flexDirection="row" alignItems="center" gap={1} width="100%">
@@ -871,7 +872,15 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
         : null
       const sourceGroups = sources.flatMap(src => src.groups)
-      const sections = needle ? [{ title: '', isOther: true, items: shown }] : arrange(shown, layout.groups, sourceGroups)
+      const arranged = needle ? [{ title: '', isOther: true, items: matches }] : arrange(matches, layout.groups, sourceGroups)
+      // A group whose workflows are all hidden goes with them (Start Here once the setup
+      // check passes), and comes back with the first of them; an empty group stays.
+      const sections = isHiding
+        ? arranged.flatMap(sec => {
+            const items = sec.items.filter(f => !hiddenWhy(f.workflow))
+            return sec.items.length && !items.length ? [] : [{ ...sec, items }]
+          })
+        : arranged
       const hasGroups = layout.groups.length > 0 || sources.length > 0
       const body: RenderChildren[] = []
       for (const [si, sec] of sections.entries()) {

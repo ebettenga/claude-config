@@ -241,6 +241,33 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
+  test(`a group whose workflows are all hidden goes too, and Arrange shows it again (${surface})`, async ($, on) => {
+    const now = new Date(2026, 9, 28, 12, 0, 0).getTime()
+    const id = '20261028-110000-dddd'
+    const run = {
+      id, workflowId: 'setup', title: 'Setup check', workflowDir: `${FLOWS}/setup`, dir: `${RUNS}/setup/${id}`, inputs: {}, status: 'done', startedAt: now - 3_600_000, endedAt: now - 3_599_000,
+      steps: [{ id: 'check', status: 'done', output: JSON.stringify({ all_ok: true }), tail: '', startedAt: now - 3_600_000, endedAt: now - 3_599_000, exitCode: 0 }],
+    }
+    world(on, {
+      [`${FLOWS}/flows.yaml`]: 'groups:\n  - title: Start Here\n    workflows: [setup]\n  - title: Reports\n    workflows: [reports]\n  - title: Later\n    workflows: []\n',
+      [`${FLOWS}/reports/flow.yaml`]: REPORTS,
+      [`${FLOWS}/setup/flow.yaml`]: 'title: Setup check\nhide_when: steps.check.json.all_ok\nsteps:\n  - id: check\n    run: echo\n',
+      [`${RUNS}/setup/${id}/run.json`]: JSON.stringify(run),
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    let all = await texts(ui)
+    expect(all).not.toContain('Start Here')
+    expect(all).toContain('Reports')
+    // A group with nothing in it yet still shows, to put workflows in.
+    expect(all).toContain('Later')
+    await ui.press({ key: 'arrange' })
+    expect(await ui.find({ type: 'Button', key: 'gdel:Start Here' })).toBeTruthy()
+    expect(await texts(ui)).toContain('Setup check')
+    expect(await ui.find({ type: 'Button', key: 'fold:hidden' })).toBeFalsy()
+    await ui.unmount()
+  })
+
   test(`hide_when leaves a workflow shown while its last run does not meet it (${surface})`, async ($, on) => {
     const now = new Date(2026, 9, 28, 12, 0, 0).getTime()
     const id = '20261028-110000-cccc'
