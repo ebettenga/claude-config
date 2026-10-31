@@ -5,8 +5,8 @@
 import type { EngineInterface } from 'claude-code'
 
 import type { CatalogItem, CatalogServer, HubCatalog, ItemRun, OutputSpec, Run, RunStatus, StepKind, StepRun, StepSpec, StepStatus, Workflow } from '../types'
-import { fill, isAIStep } from './spec'
-import type { TemplateContext } from './spec'
+import { evalCondition, fill, isAIStep, parseCondition } from './spec'
+import type { ConditionScope, TemplateContext } from './spec'
 import { BY_EXTENSION, BY_FILE_NAME, BY_FOLDER_NAME, ICON_FILE, ICON_FOLDER } from './icons'
 import { load } from './vendor/js-yaml.mjs'
 
@@ -245,6 +245,20 @@ export function stepSub(spec: StepSpec, itemCount?: number): string {
 }
 
 const isSettled = (s: StepStatus) => s !== 'pending' && s !== 'running' && s !== 'waiting'
+
+/**
+ * Whether a workflow's `hide_when:` holds for its latest finished run (runs come
+ * newest first). A workflow never run, or whose last run fails it, stays shown.
+ */
+export function isAutoHidden(wf: Workflow, runs: Run[]): boolean {
+  if (!wf.hideWhen) return false
+  const last = runs.find(r => r.workflowId === wf.id && (r.status === 'done' || r.status === 'failed'))
+  const cond = parseCondition(wf.hideWhen)
+  if (!last || !cond.node) return false
+  const steps: ConditionScope['steps'] = {}
+  for (const s of last.steps) steps[s.id] = { status: s.status, output: s.output, exit: s.exitCode === undefined ? '' : String(s.exitCode) }
+  return evalCondition(cond.node, { inputs: last.inputs, steps, after: [] })
+}
 
 /** Units of work: a step, or each item of a for_each step. */
 export function progressOf(run: Run): { settled: number; total: number } {

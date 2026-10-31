@@ -219,6 +219,8 @@ export type Workflow = {
   steps: StepSpec[]
   /** What the run leaves for people: shown after a run (Markdown rendered, CSVs as tables or charts). */
   outputs: OutputSpec[]
+  /** `hide_when:` a condition on the latest finished run; true hides the workflow from the Workflows page. */
+  hideWhen?: string
 }
 
 export type ChartType = 'bar' | 'line'

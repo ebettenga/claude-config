@@ -167,6 +167,12 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
   on('tool.register', (_, e) => ({ value: { tool: `mcp__flow__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('settings.read', () => ({ value: {} }) as never)
+  const store = new Map<string, unknown>()
+  on('store.get', (_, e) => ({ value: store.get(e.key) }) as never)
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined } as never
+  })
   const panes: string[] = []
   on('ui.open', (_, e) => {
     if (!panes.includes(e.id)) panes.push(e.id)
@@ -181,7 +187,7 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   const runIds = (wf: string) => [...fs.keys()].filter(k => k.startsWith(`${RUNS}/${wf}/`) && k.endsWith('/run.json')).map(k => k.split('/').slice(-2)[0] ?? '')
   const runFile = (wf: string, id: string) => JSON.parse(fs.get(`${RUNS}/${wf}/${id}/run.json`) ?? 'null') as Run
-  return { clock, fs, procs, fills, panes, runIds, runFile }
+  return { clock, fs, procs, fills, panes, store, runIds, runFile }
 }
 
 async function begin($: Engine, surface: (typeof SURFACES)[number]) {
@@ -190,6 +196,69 @@ async function begin($: Engine, surface: (typeof SURFACES)[number]) {
 }
 
 const texts = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string }[]> }) => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+
+for (const surface of SURFACES) {
+  test(`Hide moves a workflow to the folded Hidden section, and Unhide brings it back (${surface})`, async ($, on) => {
+    const w = world(on, { [`${FLOWS}/reports/flow.yaml`]: REPORTS, [`${FLOWS}/csv/flow.yaml`]: CSV })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Button', key: 'run:csv' })).toBeTruthy()
+    await ui.press({ key: 'hide:csv' })
+    expect(w.store.get('hiddenWorkflows')).toEqual(['csv'])
+    expect(await ui.find({ type: 'Button', key: 'run:csv' })).toBeFalsy()
+    expect(await ui.find({ type: 'Button', key: 'run:reports' })).toBeTruthy()
+    expect(await texts(ui)).toContain('▸ Hidden')
+    await ui.press({ key: 'fold:hidden' })
+    expect(await ui.find({ type: 'Button', key: 'run:csv' })).toBeTruthy()
+    await ui.press({ key: 'hide:csv' })
+    expect(w.store.get('hiddenWorkflows')).toEqual([])
+    expect(await texts(ui)).not.toContain('Hidden')
+    await ui.unmount()
+  })
+
+  test(`hide_when hides a workflow while its last run meets it (${surface})`, async ($, on) => {
+    const now = new Date(2026, 9, 28, 12, 0, 0).getTime()
+    const setup = 'title: Setup check\nhide_when: steps.check.json.all_ok\nsteps:\n  - id: check\n    run: echo\n'
+    const runOf = (id: string, at: number, isAllOk: boolean) => JSON.stringify({
+      id, workflowId: 'setup', title: 'Setup check', workflowDir: `${FLOWS}/setup`, dir: `${RUNS}/setup/${id}`, inputs: {}, status: 'done', startedAt: at, endedAt: at + 1000,
+      steps: [{ id: 'check', status: 'done', output: JSON.stringify({ all_ok: isAllOk }), tail: '', startedAt: at, endedAt: at + 1000, exitCode: 0 }],
+    })
+    const older = '20261028-100000-aaaa'
+    const newer = '20261028-110000-bbbb'
+    world(on, {
+      [`${FLOWS}/reports/flow.yaml`]: REPORTS,
+      [`${FLOWS}/setup/flow.yaml`]: setup,
+      [`${RUNS}/setup/${older}/run.json`]: runOf(older, now - 7_200_000, false),
+      [`${RUNS}/setup/${newer}/run.json`]: runOf(newer, now - 3_600_000, true),
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    // The latest run passed every check: hidden, and with no Unhide (it comes back on its own).
+    expect(await ui.find({ type: 'Button', key: 'run:setup' })).toBeFalsy()
+    await ui.press({ key: 'fold:hidden' })
+    expect(await ui.find({ type: 'Button', key: 'run:setup' })).toBeTruthy()
+    expect(await ui.find({ type: 'Button', key: 'hide:setup' })).toBeFalsy()
+    await ui.unmount()
+  })
+
+  test(`hide_when leaves a workflow shown while its last run does not meet it (${surface})`, async ($, on) => {
+    const now = new Date(2026, 9, 28, 12, 0, 0).getTime()
+    const id = '20261028-110000-cccc'
+    const run = {
+      id, workflowId: 'setup', title: 'Setup check', workflowDir: `${FLOWS}/setup`, dir: `${RUNS}/setup/${id}`, inputs: {}, status: 'done', startedAt: now - 3_600_000, endedAt: now - 3_599_000,
+      steps: [{ id: 'check', status: 'done', output: JSON.stringify({ all_ok: false }), tail: '', startedAt: now - 3_600_000, endedAt: now - 3_599_000, exitCode: 0 }],
+    }
+    world(on, {
+      [`${FLOWS}/setup/flow.yaml`]: 'title: Setup check\nhide_when: steps.check.json.all_ok\nsteps:\n  - id: check\n    run: echo\n',
+      [`${RUNS}/setup/${id}/run.json`]: JSON.stringify(run),
+    })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ type: 'Button', key: 'run:setup' })).toBeTruthy()
+    expect(await texts(ui)).not.toContain('Hidden')
+    await ui.unmount()
+  })
+}
 
 // Jest and docker colour their output: a tail with escape codes used to blank the whole pane.
 for (const surface of SURFACES) {

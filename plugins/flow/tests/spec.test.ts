@@ -764,3 +764,13 @@ describe('cleanTerminal', () => {
     expect(cleanTerminal('x'.repeat(600))).toBe(`${'x'.repeat(500)}…`)
   })
 })
+
+test('loader: hide_when is a condition on the run, and its references are checked', () => {
+  const ok = parse('title: T\nhide_when: steps.check.json.all_ok\nsteps:\n  - id: check\n    run: echo\n')
+  expect(ok.errors).toEqual([])
+  expect(ok.workflow?.hideWhen).toBe('steps.check.json.all_ok')
+  expect(parse('title: T\nsteps:\n  - id: a\n    run: echo\n').workflow?.hideWhen).toBeUndefined()
+  const bad = parse('title: T\nhide_when: steps.nope.output == "x"\nsteps:\n  - id: a\n    run: echo\n')
+  expect(bad.errors.join('\n')).toContain('hide_when: steps.nope names no step')
+  expect(parse('title: T\nhide_when: [1]\nsteps:\n  - id: a\n    run: echo\n').errors.join('\n')).toContain('hide_when: must be a condition')
+})

@@ -23,6 +23,24 @@ const hubPicker = atom({ plugin: 'flow', key: 'hubPicker' } as const, null as Hu
 const hubLogStep = atom({ plugin: 'flow', key: 'hubLogStep' } as const, '', { shape: 'hub-log-1' })
 const hubFrame = atom({ plugin: 'flow', key: 'hubFrame' } as const, 0, { shape: 'hub-frame-1' })
 const hubEnv = atom({ plugin: 'flow', key: 'hubEnv' } as const, {} as HubEnv, { shape: 'hub-env-1' })
+const hubHidden = atom({ plugin: 'flow', key: 'hubHidden' } as const, [] as string[], { shape: 'hub-hidden-1' })
+
+// The workflows this person hid from the Workflows page, by id. Kept in the
+// plugin's store (theirs, across sessions), never in a shared flows.yaml.
+const HIDDEN_KEY = 'hiddenWorkflows'
+
+async function storedHidden($: $): Promise<string[]> {
+  const stored = await $.store.get(HIDDEN_KEY).catch(() => undefined)
+  return Array.isArray(stored) ? stored.filter((id): id is string => typeof id === 'string') : []
+}
+
+/** Hides a workflow from the Workflows page, or shows it again. */
+export async function setHidden($: $, workflowId: string, isHidden: boolean): Promise<void> {
+  const others = (await storedHidden($)).filter(id => id !== workflowId)
+  const next = isHidden ? [...others, workflowId] : others
+  await $.store.set(HIDDEN_KEY, next)
+  await update($, hubHidden, () => next)
+}
 
 export async function openHub($: $): Promise<void> {
   await $.ui.open({ id: PANE, title: TITLE })
@@ -95,6 +113,8 @@ export async function hubSessionStart($: $, found: Found[]): Promise<void> {
     argumentHint: '[workflow id]',
   })
   await checkEnv($, found).catch(() => undefined)
+  const hidden = await storedHidden($)
+  await update($, hubHidden, () => hidden)
 }
 
 /** A run started (from the hub or Claude's run_workflow): the pane, when not open, opens on it. */

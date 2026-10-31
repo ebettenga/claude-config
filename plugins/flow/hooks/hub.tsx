@@ -34,6 +34,7 @@ import {
   folderIconOf,
   itemAt,
   lastRunLine,
+  isAutoHidden,
   linkTarget,
   loadCatalog,
   nowLine,
@@ -50,7 +51,7 @@ import {
   tildify,
   tint,
 } from './hub-parts'
-import { checkEnv, openHub, showRun, showWorkflow } from './hub-state'
+import { checkEnv, openHub, setHidden, showRun, showWorkflow } from './hub-state'
 import { SVG } from './icons'
 import { agentsView } from './progress'
 import { cancelRun, decideStep, inputPick, inputSearch, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun, tabOf, tabRange, viewAction, viewOpen, viewRange, viewSearch, viewTab } from './runner'
@@ -97,6 +98,10 @@ const layoutAtom = atom({ plugin: 'flow', key: 'layout' } as const, { groups: []
 const hubArrange = atom({ plugin: 'flow', key: 'hubArrange' } as const, false, { shape: 'hub-arrange-1' })
 /** Groups folded shut on the Workflows page, by title (this viewer's, not saved to flows.yaml). */
 const hubFolded = atom({ plugin: 'flow', key: 'hubFolded' } as const, {} as Record<string, boolean>, { shape: 'hub-folded-1' })
+/** Workflows this person hid from the Workflows page (hub-state.ts keeps them in the store). */
+const hubHidden = atom({ plugin: 'flow', key: 'hubHidden' } as const, [] as string[], { shape: 'hub-hidden-1' })
+/** The Hidden section's key in hubFolded: no group title can be empty, so it never meets one. */
+const HIDDEN_FOLD = ''
 
 // Module scope is fine here: registerHub sets these again on every (re)load.
 let workflowsDir = '~/Documents/flows'
@@ -227,7 +232,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       read($, hubArrange),
       read($, hubFolded),
     ])
-    const [views, viewStates, viewId, searches] = await Promise.all([read($, viewsAtom), read($, viewStatesAtom), read($, hubView), read($, hubInputSearch)])
+    const [views, viewStates, viewId, searches, hiddenIds] = await Promise.all([read($, viewsAtom), read($, viewStatesAtom), read($, hubView), read($, hubInputSearch), read($, hubHidden)])
     const now = await $.clock.now()
     const cwd = await $.session.cwd().catch(() => '')
     const home = ((await $.env.get('HOME').catch(() => undefined)) ?? '').replace(/\/+$/, '')
@@ -822,11 +827,14 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
 
     function workflowsList(): RenderChildren[] {
       const needle = q.trim().toLowerCase()
-      const shown = loaded.filter(f => {
+      const matches = loaded.filter(f => {
         if (!needle) return true
         const wf = f.workflow
         return [wf.title, wf.description, wf.id, ...wf.tags].some(s => s.toLowerCase().includes(needle))
       })
+      // A search finds hidden workflows too; without one they wait in the Hidden section.
+      const hidden = needle ? [] : matches.filter(f => hiddenWhy(f.workflow))
+      const shown = needle ? matches : matches.filter(f => !hiddenWhy(f.workflow))
       const broken = found.filter(f => f.errors.length)
       const search = Input ? (
         <Box flexDirection="row" alignItems="center" gap={1} width="100%">
@@ -874,13 +882,26 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         if (!isFolded && !sec.items.length && (hasGroups || isArranging))
           body.push(<Text key={`empty:${sec.title}`} dimColor size="footnote">{sec.isOther ? 'Every workflow is in a group.' : 'No workflows yet: put one here with its group menu.'}</Text>)
       }
+      if (hidden.length) {
+        // Shut until opened: what is hidden is out of the way.
+        const isFolded = folded[HIDDEN_FOLD] !== false
+        body.push(
+          <Box key="group:hidden" flexDirection="row" alignItems="center" gap={1} paddingTop={body.length ? 'sm' : 0}>
+            <Button key="fold:hidden" plain onPress={() => void update($, hubFolded, all => ({ ...all, [HIDDEN_FOLD]: !isFolded }))}>
+              <Text weight="bold" size={isDesktop ? 'heading' : undefined} dimColor>{`${isFolded ? '▸ ' : '▾ '}Hidden`}</Text>
+            </Button>
+            <Text dimColor size="footnote">{String(hidden.length)}</Text>
+          </Box>,
+        )
+        if (!isFolded) body.push(...hidden.map(f => workflowCard(f)))
+      }
       return [
         search,
         head,
         problems,
         ...body,
         isArranging && !needle ? newGroupRow() : null,
-        shown.length
+        matches.length
           ? null
           : <Text dimColor>{needle ? `No workflow matches “${q.trim()}”` : `No workflows yet: add a folder with a flow.yaml to ${workflowsDir}.`}</Text>,
         broken.length
@@ -890,6 +911,12 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
             ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
           : null,
       ]
+    }
+
+    /** Why a workflow is off the Workflows page: the viewer hid it, or its hide_when: holds. */
+    function hiddenWhy(wf: Workflow): 'hidden' | 'auto' | undefined {
+      if (hiddenIds.includes(wf.id)) return 'hidden'
+      return isAutoHidden(wf, runs) ? 'auto' : undefined
     }
 
     // ── groups (flows.yaml) ──
@@ -984,12 +1011,22 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const last = lastRunLine(runs, wf.id, now)
       const { fixed, ai } = stepCounts(wf)
       const unset = wf.env.filter(n => env[n] === false)
+      const why = hiddenWhy(wf)
+      // A hide_when: workflow comes back by itself when a run no longer meets it.
+      const hideButton = why === 'auto' ? null : <Button key={`hide:${wf.id}`} plain onPress={() => void setHidden($, wf.id, !why)}>{why ? 'Unhide' : 'Hide'}</Button>
       return card(`wf:${wf.id}`, [
         <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
           <Box flexShrink={1} minWidth={0} overflow="hidden">
             <Text size="heading" weight="semibold" wrap="truncate-end">{wf.title}</Text>
           </Box>
-          {at ? arrangeControls(f, at) : <Button key={`run:${wf.id}`} variant="primary" onPress={() => void showWorkflow($, wf.id)}>Run</Button>}
+          {at
+            ? arrangeControls(f, at)
+            : (
+                <Box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+                  {hideButton}
+                  <Button key={`run:${wf.id}`} variant="primary" onPress={() => void showWorkflow($, wf.id)}>Run</Button>
+                </Box>
+              )}
         </Box>,
         wf.description ? <Text dimColor size="footnote">{clip(wf.description, Math.max(40, (width - 6) * 2))}</Text> : null,
         <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
@@ -1003,6 +1040,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           <Text color={last.color} size="footnote" weight="medium">{last.text}</Text>
         </Box>,
         unset.length ? note(`env:${wf.id}`, '!', `Needs ${unset.join(', ')} in your environment`, C.dirty) : null,
+        why === 'auto' ? note(`auto:${wf.id}`, '✓', 'Hidden while its last run meets its hide_when; it comes back when one does not', C.add) : null,
       ])
     }
 

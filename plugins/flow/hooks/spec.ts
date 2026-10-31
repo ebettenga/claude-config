@@ -494,6 +494,21 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
     }
   })
 
+  // hide_when: a condition on the latest finished run, as a step's if: is on the run so far.
+  let hideWhen: string | undefined
+  if (doc.hide_when !== undefined) {
+    const parsed = typeof doc.hide_when === 'string' || typeof doc.hide_when === 'boolean' ? parseCondition(String(doc.hide_when)) : undefined
+    if (!parsed) errors.push('hide_when: must be a condition, as in an if:')
+    else if (!parsed.node) errors.push(`hide_when: ${parsed.error}`)
+    else {
+      hideWhen = String(doc.hide_when)
+      for (const ref of conditionRefs(parsed.node)) {
+        if (ref[0] === 'inputs' && !known.inputs.has(ref[1] ?? '')) errors.push(`hide_when: inputs.${ref[1]} names no input`)
+        if (ref[0] === 'steps' && !known.steps.has(ref[1] ?? '')) errors.push(`hide_when: steps.${ref[1]} names no step`)
+      }
+    }
+  }
+
   found.workflow = {
     id,
     title: str(doc.title) || id,
@@ -504,6 +519,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
     inputs,
     steps,
     outputs: parseOutputs(doc.outputs, errors),
+    ...(hideWhen ? { hideWhen } : {}),
   }
   return found
 }
