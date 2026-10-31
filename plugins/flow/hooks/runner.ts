@@ -29,6 +29,8 @@ import {
 } from './spec'
 import type { ConditionScope, TemplateContext } from './spec'
 import { hubRunStarted, hubSessionStart, hubTick, showView } from './hub-state'
+import { declaredLocals, readLocals, resolveLocals, setLocal } from './locals'
+import { configureSync, pullRepo, refreshSync, registerSyncTools, shareText, startSync, syncRepos, syncStatusText } from './sync'
 
 export const workflowsAtom = atom({ plugin: 'flow', key: 'workflows' } as const, [], { shape: 'workflows-1' })
 /** The flows folder's flows.yaml: how the Workflows page groups and orders them. */
@@ -134,24 +136,33 @@ async function cloneSource($: $, src: Source): Promise<string | undefined> {
 }
 
 /**
- * Pulls every source (fast-forward only), cloning the ones not here yet,
- * then reads everything again. Returns one line per source.
+ * Pulls the flows folder when it is a git repo and every source (sync.ts's
+ * pullRepo: a rebase that keeps local edits), cloning the sources not here
+ * yet, then reads everything again. Returns one line per repo.
  */
 export async function pullSources($: $): Promise<string[]> {
   const { sources } = await readSources($)
+  const repos = await syncRepos($)
   const lines: string[] = []
+  const local = repos.find(r => !r.isSource)
+  if (local) {
+    const { error } = await pullRepo($, local, { refresh: false })
+    lines.push(`${local.title}: ${error ? `failed: ${error}` : 'pulled'} (${local.path})`)
+  }
   for (const src of sources) {
-    const isRepo = await $.fs.exists(`${src.path}/.git`).catch(() => false)
-    const isHere = isRepo || (await $.fs.exists(src.path).catch(() => false))
-    if (isHere && !isRepo) {
+    const repo = repos.find(r => r.isSource && r.name === src.name)
+    if (!repo && local?.path === src.path) continue
+    const isHere = Boolean(repo) || (await $.fs.exists(src.path).catch(() => false))
+    if (isHere && !repo) {
       lines.push(`${src.title}: a plain folder, nothing to pull (${src.path})`)
       continue
     }
-    const error = isRepo ? await git($, ['pull', '--ff-only', '--quiet'], src.path) : await cloneSource($, src)
+    const error = repo ? (await pullRepo($, repo, { refresh: false })).error : await cloneSource($, src)
     pulls.set(src.name, { at: await $.clock.now(), ...(error ? { error } : {}) })
-    lines.push(`${src.title}: ${error ? `failed: ${error}` : isRepo ? 'pulled' : 'cloned'} (${src.path})`)
+    lines.push(`${src.title}: ${error ? `failed: ${error}` : repo ? 'pulled' : 'cloned'} (${src.path})`)
   }
   await refreshWorkflows($)
+  await refreshSync($).catch(() => undefined)
   return lines.length ? lines : [`no sources in ${workflowsDir}/${LAYOUT_FILE}`]
 }
 
@@ -629,7 +640,7 @@ const itemOf = (spec: StepSpec, index: number, value: string) => ({ value, index
 function baseContext(run: Run): TemplateContext {
   const outputs: Record<string, string> = {}
   for (const s of run.steps) if (s.status === 'done') outputs[s.id] = s.output
-  return { inputs: run.inputs, outputs, runDir: run.dir }
+  return { inputs: run.inputs, outputs, runDir: run.dir, locals: run.locals ?? {} }
 }
 
 /** A step's `outputs:`, filled (per item for a for_each step) and relative to the run folder. */
@@ -664,7 +675,7 @@ function templateContext(ctx: Live, item?: TemplateContext['item']): TemplateCon
 function conditionScope(run: Run, spec: StepSpec): ConditionScope {
   const steps: ConditionScope['steps'] = {}
   for (const s of run.steps) steps[s.id] = { status: s.status, output: s.output, exit: s.exitCode === undefined ? '' : String(s.exitCode) }
-  return { inputs: run.inputs, steps, after: spec.after.map(id => stepOf(run, id)?.status ?? '') }
+  return { inputs: run.inputs, locals: run.locals ?? {}, steps, after: spec.after.map(id => stepOf(run, id)?.status ?? '') }
 }
 
 /** Run and agent units going now: each step, or each item of a for_each step. */
@@ -1042,6 +1053,7 @@ const FLOW_PY = `"""The run's context for a flow python step; written by the flo
 
     from flow import flow
     flow.inputs["csv"]               # the run's inputs, as strings
+    flow.locals["backend_repo"]      # your own values (locals:), from ~/.flow/locals.yaml
     flow.steps["fetch"].json         # an earlier step: .output .json .files .dir .status .exit
     flow.run_dir, flow.item, flow.item_index
     flow.set_output({"count": 3})    # this step's output (as JSON) instead of stdout
@@ -1089,6 +1101,7 @@ class Flow:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
         self.inputs = dict(data.get("inputs") or {})
+        self.locals = dict(data.get("locals") or {})
         self.steps = Steps((k, Step(k, v)) for k, v in (data.get("steps") or {}).items())
         self.run_dir = data.get("run_dir") or os.environ.get("FLOW_RUN_DIR", "")
         self.item = data.get("item")
@@ -1140,14 +1153,14 @@ class Flow:
 flow = Flow()
 `
 
-/** What a python step's helper reads: the inputs, every step so far, the run folder and the item. */
+/** What a python step's helper reads: the inputs, the locals, every step so far, the run folder and the item. */
 function pythonContext(ctx: Live, value?: TemplateContext['item']) {
   const { run } = ctx
   const tctx = templateContext(ctx)
   const steps: Record<string, { status: string; output: string; json: unknown; files: string[]; dir: string; exit: number | null }> = {}
   for (const s of run.steps)
     steps[s.id] = { status: s.status, output: s.output, json: parseJson(s.output), files: tctx.files?.[s.id] ?? [], dir: tctx.dirs?.[s.id] || run.dir, exit: s.exitCode ?? null }
-  return { inputs: run.inputs, steps, run_dir: run.dir, item: value?.value ?? null, item_index: value?.index ?? null }
+  return { inputs: run.inputs, locals: run.locals ?? {}, steps, run_dir: run.dir, item: value?.value ?? null, item_index: value?.index ?? null }
 }
 
 // A `python` step: [interpreter, script, ...args] (no shell) in the workflow folder, with the flow helper on PYTHONPATH.
@@ -1866,12 +1879,15 @@ export async function startRun(
   const wf = found.workflow
   if (!wf || found.errors.length) return { problems: found.errors.length ? found.errors.map(e => `${found.file}: ${e}`) : [`${found.file} did not load`] }
 
+  // Locals first: an input's default may use them.
+  const homeDir = await home($)
+  const locals = resolveLocals(wf, await readLocals($), homeDir)
   const values: Record<string, string> = {}
   const at = await $.clock.now()
   for (const input of wf.inputs) {
     const given = inputs[input.id]
     values[input.id] =
-      given === undefined || given === null ? defaultValue(input, new Date(at)) : typeof given === 'string' ? given : String(given)
+      given === undefined || given === null ? defaultValue(input, new Date(at), locals.values) : typeof given === 'string' ? given : String(given)
   }
   const problems = inputProblems(wf, values)
   if (options.parent)
@@ -1879,6 +1895,11 @@ export async function startRun(
   for (const name of wf.env) {
     if (!ENV_NAME_RE.test(name)) problems.push(`env: "${name}" is not a variable name`)
     else if (!(await isEnvSet($, name))) problems.push(`${name} is not set in the environment`)
+  }
+  for (const local of locals.missing) problems.push(`${local.label} is not set: set "${local.id}" in Your settings (~/.flow/locals.yaml)`)
+  for (const local of wf.locals ?? []) {
+    const path = locals.values[local.id]
+    if (local.type !== 'text' && path && !(await $.fs.exists(path).catch(() => false))) problems.push(`${local.label}: ${path} does not exist`)
   }
   problems.push(...(await mcpProblems($, wf, found)))
   for (const input of wf.inputs) {
@@ -1905,8 +1926,9 @@ export async function startRun(
     workflowId: wf.id,
     title: wf.title,
     workflowDir: found.dir,
-    dir: `${await home($)}/.flow/runs/${wf.id}/${id}`,
+    dir: `${homeDir}/.flow/runs/${wf.id}/${id}`,
     inputs: values,
+    ...(wf.locals?.length ? { locals: locals.values } : {}),
     status: 'running',
     startedAt: at,
     steps: wf.steps.map(s => ({ id: s.id, status: 'pending', output: '', tail: '' })),
@@ -2014,6 +2036,7 @@ function describeWorkflow(f: Found) {
     owner: wf?.owner ?? '',
     tags: wf?.tags ?? [],
     env: wf?.env ?? [],
+    locals: (wf?.locals ?? []).map(l => l.id),
     inputs: (wf?.inputs ?? []).map(i => ({
       id: i.id,
       label: i.label,
@@ -2146,7 +2169,7 @@ async function registerTools($: $): Promise<void> {
     name: 'list_workflows',
     description:
       `List the saved flow workflows the user can run. A workflow is a flow.yaml (a form of inputs and a list of steps: shell commands, python scripts, MCP tool calls, HTTP requests, flow agents, approval gates, prompts to this session, waits for a file, URL or time, and other workflows run as child runs; steps can have if: conditions, retries, for_each items and required output files). ${where} ` +
-      'Returns JSON: id, source (the source it came from, when not the flows folder), title, description, owner, tags, env (variables that must be set), inputs (id, label, type, required, options, default), steps (id, kind, title, isAI: true for agent and claude steps), aiSteps and fixedSteps (counts) and errors. ' +
+      'Returns JSON: id, source (the source it came from, when not the flows folder), title, description, owner, tags, env (variables that must be set), locals (ids of the per-person values it uses; get_locals shows them), inputs (id, label, type, required, options, default), steps (id, kind, title, isAI: true for agent and claude steps), aiSteps and fixedSteps (counts) and errors. ' +
       `Use it when the user asks which workflows exist or wants to run one, before run_workflow. ${prefer}`,
     inputSchema: { type: 'object', properties: {} },
   })
@@ -2154,7 +2177,7 @@ async function registerTools($: $): Promise<void> {
     name: 'run_workflow',
     description:
       `Start a run of a saved flow workflow by its id (from list_workflows). ${where} ` +
-      'Inputs are strings keyed by input id; inputs left out take their defaults. Returns the run id, or the problems (missing required inputs, unset env variables, missing files) and nothing starts. ' +
+      'Inputs are strings keyed by input id; inputs left out take their defaults. Returns the run id, or the problems (missing required inputs, unset env variables or locals, missing files) and nothing starts. ' +
       'The run goes on in the background; the user watches it in /flowboard and you can check it with run_status.',
     inputSchema: {
       type: 'object',
@@ -2238,8 +2261,8 @@ async function registerTools($: $): Promise<void> {
   await $.tool.register({
     name: 'pull_sources',
     description:
-      `Fetch the latest flow workflows from every source listed under sources: in ${workflowsDir}/flows.yaml (a team's shared git repo of workflows): clones the ones not on this Mac yet and fast-forwards the rest, then reloads the workflow list. ` +
-      'Returns one line per source: cloned, pulled, or why it failed (no access, a diverged branch). Use it when the user asks to update, pull or sync their workflows, or when a workflow they name is in a source but not found yet.',
+      `Fetch the latest flow workflows into the flows folder (when it is a git repo) and every source listed under sources: in ${workflowsDir}/flows.yaml (a team's shared git repo of workflows): clones the ones not on this Mac yet and pulls the rest (a rebase that keeps the user's own edits), then reloads the workflow list. ` +
+      'Returns one line per repo: cloned, pulled, or why it failed (no access, a conflict, which leaves the repo as it was). Use it when the user asks to update, pull or sync their workflows, or when a workflow they name is in a source but not found yet.',
     inputSchema: { type: 'object', properties: {} },
   })
   await $.tool.register({
@@ -2247,6 +2270,30 @@ async function registerTools($: $): Promise<void> {
     description:
       'Cancel a flow workflow run that is running or waiting (by the run id): running and waiting steps are stopped and cancelled, pending ones skipped, no retry starts, and child runs its uses steps started are cancelled too. Only when the user asks to stop or cancel a run.',
     inputSchema: { type: 'object', properties: { run: { type: 'string', description: 'The run id.' } }, required: ['run'] },
+  })
+  const localsAre =
+    'Locals are per-person values a workflow declares under locals: (a repo folder, an AWS profile name), kept in ~/.flow/locals.yaml on this Mac and never in the shared workflow. They are not for secrets (tokens and keys stay in env: variables).'
+  await $.tool.register({
+    name: 'get_locals',
+    description:
+      `List the flow locals the loaded workflows declare. ${localsAre} ` +
+      'Returns JSON, one entry per local id: id, label, type (text, folder or file), help, default, value (what the user set, or null) and usedBy (workflow ids). ' +
+      'Use it when a run is refused because a local is not set, or when the user asks about their flow settings.',
+    inputSchema: { type: 'object', properties: {} },
+  })
+  await $.tool.register({
+    name: 'set_local',
+    description:
+      `Set one flow local for this user, in ~/.flow/locals.yaml. ${localsAre} ` +
+      'An empty value clears it (the workflow\'s default, if any, applies again). Only set what the user tells you (a path they name, a profile they use); never put a secret here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The local id (snake_case), from get_locals.' },
+        value: { type: 'string', description: 'The value; an absolute path (or ~/...) for folder and file locals. Empty clears it.' },
+      },
+      required: ['id', 'value'],
+    },
   })
   await $.tool.register({
     name: 'step_log',
@@ -2276,6 +2323,7 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
   isHydrated = false
   sessionCwd = undefined
   workflowsDir = typeof options.workflowsDir === 'string' && options.workflowsDir.trim() ? options.workflowsDir.trim() : '~/Documents/flows'
+  configureSync(workflowsDir)
 
   // progress.tsx hooks session.start and turn.complete without a matcher, and a
   // plugin may do that once per event: these matchers name every case, so the
@@ -2284,6 +2332,7 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     const started = await next(e)
     sessionCwd = e.cwd
     await registerTools($)
+    await registerSyncTools($)
     await refreshWorkflows($).catch(() => undefined)
     // A new session: nothing of the last one is still going.
     isHydrated = true
@@ -2297,6 +2346,8 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     } catch {
       // No timer here (a test kit): the hub's shimmer stands still.
     }
+    // The team sync's fetch, in the background: a second later, then every 5 minutes.
+    startSync($, () => refreshWorkflows($))
     return started
   })
 
@@ -2362,6 +2413,16 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
 
   on('tool.call', { tool: 'mcp__flow__pull_sources' }, async $ => ({ result: (await pullSources($)).join('\n') }))
 
+  // Team sync (sync.ts): status, pull and share; a Share pulls first, so the workflows are read again after.
+  on('tool.call', { tool: 'mcp__flow__sync_status' }, async $ => ({ result: await syncStatusText($) }))
+  on('tool.call', { tool: 'mcp__flow__pull_changes' }, async $ => ({ result: (await pullSources($)).join('\n') }))
+  on('tool.call', { tool: 'mcp__flow__share_changes' }, async ($, e) => {
+    const input = e as unknown as { repo?: unknown; message?: unknown }
+    const result = await shareText($, str(input.repo).trim(), str(input.message))
+    await refreshWorkflows($).catch(() => undefined)
+    return { result }
+  })
+
   on('tool.call', { tool: 'mcp__flow__list_views' }, async $ => {
     await refreshWorkflows($)
     const views = await read($, viewsAtom)
@@ -2415,6 +2476,27 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     const { error } = await cancelRun($, runId)
     if (error) return { result: `error: ${error}` }
     return { result: `Cancelled run ${runId}.\n\n${await runStatusText($, runId)}` }
+  })
+
+  on('tool.call', { tool: 'mcp__flow__get_locals' }, async $ => {
+    const declared = declaredLocals(await refreshWorkflows($))
+    const stored = await readLocals($)
+    const rows = declared.map(({ spec, usedBy }) => ({ id: spec.id, label: spec.label, type: spec.type, help: spec.help, default: spec.default, value: stored[spec.id] ?? null, usedBy }))
+    return { result: JSON.stringify(rows, null, 2) }
+  })
+
+  on('tool.call', { tool: 'mcp__flow__set_local' }, async ($, e) => {
+    const input = e as unknown as { id?: unknown; value?: unknown }
+    const id = str(input.id).trim()
+    const value = str(input.value).trim()
+    try {
+      await setLocal($, id, value)
+    } catch (err) {
+      return { result: `error: ${errText(err)}` }
+    }
+    const isDeclared = declaredLocals(await read($, workflowsAtom)).some(d => d.spec.id === id)
+    const note = isDeclared || !value ? '' : ` No loaded workflow declares "${id}" yet.`
+    return { result: `${value ? `Set ${id} to ${value}` : `Cleared ${id}`} in ~/.flow/locals.yaml.${note}` }
   })
 
   on('tool.call', { tool: 'mcp__flow__step_log' }, async ($, e) => {

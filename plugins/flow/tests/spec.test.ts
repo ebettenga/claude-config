@@ -180,7 +180,7 @@ describe('defaultValue', () => {
 })
 
 describe('inputProblems', () => {
-  const wf = (inputs: InputSpec[]): Workflow => ({ id: 'w', title: 'W', description: '', owner: '', tags: [], env: [], inputs, steps: [], outputs: [] })
+  const wf = (inputs: InputSpec[]): Workflow => ({ id: 'w', title: 'W', description: '', owner: '', tags: [], env: [], locals: [], inputs, steps: [], outputs: [] })
 
   test('required, numbers, dates, selects and file types', () => {
     const w = wf([

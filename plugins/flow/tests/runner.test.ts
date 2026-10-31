@@ -1348,7 +1348,7 @@ test('sources: a missing source is cloned once, its workflows load with its name
   expect(w.runFile('mrs', id).workflowDir).toBe(`${TEAM}/mrs`)
 })
 
-test('sources: pull_sources fast-forwards a clone and names a failure', async ($, on) => {
+test('sources: pull_sources rebases a clone onto its upstream and names a failure', async ($, on) => {
   let fail = false
   const w = world(on, {
     files: { [`${FLOWS}/flows.yaml`]: SOURCES, [`${TEAM}/.git/HEAD`]: 'x', [`${TEAM}/mrs/flow.yaml`]: PARALLEL },
@@ -1356,7 +1356,7 @@ test('sources: pull_sources fast-forwards a clone and names a failure', async ($
   })
   await begin($)
   expect(await call($, 'pull_sources', {})).toBe(`Team: pulled (${TEAM})`)
-  expect(w.runs.filter(a => a[0] === 'git').at(-1)).toEqual(['git', 'pull', '--ff-only', '--quiet'])
+  expect(w.runs.filter(a => a[0] === 'git' && a[1] === 'pull')).toEqual([['git', 'pull', '--rebase', '--autostash', '--quiet']])
   fail = true
   expect(await call($, 'pull_sources', {})).toBe(`Team: failed: fatal: Not possible to fast-forward, aborting. (${TEAM})`)
 
@@ -1470,4 +1470,104 @@ test('views: JSON cut short on the way is an error, not an empty page', async ($
   })
   await begin($)
   expect(await call($, 'open_view', { id: 'people', query: 'x' })).toContain('was cut short')
+})
+
+// ---------------------------------------------------------------------------
+// locals: per-person values from ~/.flow/locals.yaml
+
+const LOCALS_FILE = `${HOME}/.flow/locals.yaml`
+const WITH_LOCALS = `
+title: With locals
+locals:
+  - id: backend_repo
+    label: Backend repo
+    type: folder
+    default: ~/repos/web
+  - id: aws_profile
+    label: AWS profile
+inputs:
+  - id: sub
+    default: "{{local.backend_repo}}/app"
+steps:
+  - id: list
+    run: cd {{local.backend_repo | sh}} && aws --profile {{local.aws_profile}} ls {{inputs.sub}}
+    if: local.aws_profile != ""
+  - id: py
+    python: |
+      from flow import flow
+      print(flow.locals["aws_profile"])
+`
+
+test('locals: a run is refused while a local is unset or its folder is missing', async ($, on) => {
+  const w = world(on, { files: { [`${FLOWS}/loc/flow.yaml`]: WITH_LOCALS } })
+  await begin($)
+  expect(await call($, 'run_workflow', { id: 'loc' })).toBe(
+    'Not started:\n- AWS profile is not set: set "aws_profile" in Your settings (~/.flow/locals.yaml)\n- Backend repo: /home/u/repos/web does not exist',
+  )
+  await w.clock.settle()
+  expect(w.procs.length).toBe(0)
+})
+
+test('locals: steps see the values in templates, conditions and python flow.locals; uses children resolve their own', async ($, on) => {
+  const w = world(on, {
+    files: {
+      [`${FLOWS}/loc/flow.yaml`]: WITH_LOCALS,
+      [LOCALS_FILE]: "# mine\naws_profile: kh-dev\nbackend_repo: ~/src/it's web\n",
+      [`${HOME}/src/it's web/x`]: '',
+    },
+  })
+  await begin($)
+  const id = await start($, 'loc')
+  await w.clock.settle()
+  const repo = `${HOME}/src/it's web`
+  expect(w.runFile('loc', id).locals).toEqual({ backend_repo: repo, aws_profile: 'kh-dev' })
+  expect(w.runFile('loc', id).inputs).toEqual({ sub: `${repo}/app` })
+  expect(w.procs[0]?.command).toBe(`cd '${HOME}/src/it'\\''s web' && aws --profile kh-dev ls ${repo}/app`)
+  w.procs[0]?.finish(0)
+  await w.clock.settle()
+  const context = JSON.parse(w.files.get(w.procs[1]?.env?.FLOW_CONTEXT ?? '') ?? 'null') as Record<string, unknown>
+  expect(context.locals).toEqual({ backend_repo: repo, aws_profile: 'kh-dev' })
+  expect(w.files.get(`${RUNS}/loc/${id}/.flow/flow.py`)).toContain('self.locals = dict(data.get("locals") or {})')
+  w.procs[1]?.finish(0, 'kh-dev\n')
+  await w.clock.settle()
+  expect(w.runFile('loc', id).status).toBe('done')
+})
+
+test('locals: a uses child is refused when its own local is unset', async ($, on) => {
+  const w = world(on, {
+    files: {
+      [`${FLOWS}/parent/flow.yaml`]: 'title: Parent\nsteps:\n  - id: child\n    uses: kid\n',
+      [`${FLOWS}/kid/flow.yaml`]: 'title: Kid\nlocals:\n  - id: profile\n    label: Profile\nsteps:\n  - run: echo {{local.profile}}\n',
+    },
+  })
+  await begin($)
+  const id = await start($, 'parent')
+  await w.clock.settle()
+  expect(w.runFile('parent', id).steps[0]).toMatchObject({ status: 'failed', error: 'kid did not start: Profile is not set: set "profile" in Your settings (~/.flow/locals.yaml)' })
+})
+
+test('locals: set_local writes ~/.flow/locals.yaml, get_locals lists them, list_workflows names them', async ($, on) => {
+  const w = world(on, {
+    files: {
+      [`${FLOWS}/loc/flow.yaml`]: WITH_LOCALS,
+      [`${FLOWS}/other/flow.yaml`]: 'title: Other\nlocals:\n  - id: aws_profile\n    label: Profile (other)\nsteps:\n  - run: ls\n',
+    },
+  })
+  await begin($)
+  expect(await call($, 'set_local', { id: 'aws_profile', value: ' kh-dev ' })).toBe('Set aws_profile to kh-dev in ~/.flow/locals.yaml.')
+  expect(await call($, 'set_local', { id: 'stray', value: '1' })).toBe('Set stray to 1 in ~/.flow/locals.yaml. No loaded workflow declares "stray" yet.')
+  expect(await call($, 'set_local', { id: 'stray', value: '' })).toBe('Cleared stray in ~/.flow/locals.yaml.')
+  expect(await call($, 'set_local', { id: 'Bad Id', value: 'x' })).toMatch(/^error: "Bad Id" is not a local id/)
+  expect(w.files.get(LOCALS_FILE)).toBe('# Your flow locals: values only you use. Never committed anywhere.\naws_profile: kh-dev\n')
+
+  const locals = JSON.parse(await call($, 'get_locals', {})) as unknown[]
+  expect(locals).toEqual([
+    { id: 'backend_repo', label: 'Backend repo', type: 'folder', help: '', default: '~/repos/web', value: null, usedBy: ['loc'] },
+    { id: 'aws_profile', label: 'AWS profile', type: 'text', help: '', default: '', value: 'kh-dev', usedBy: ['loc', 'other'] },
+  ])
+  const list = JSON.parse(await call($, 'list_workflows', {})) as { id: string; locals: string[] }[]
+  expect(list.map(f => [f.id, f.locals])).toEqual([
+    ['loc', ['backend_repo', 'aws_profile']],
+    ['other', ['aws_profile']],
+  ])
 })

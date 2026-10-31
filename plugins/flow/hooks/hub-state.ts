@@ -6,6 +6,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 import type { Found, HubEnv, HubPicker, HubTab, Run } from '../types'
+import { readLocals } from './locals'
 
 type $ = EngineInterface
 
@@ -24,6 +25,7 @@ const hubLogStep = atom({ plugin: 'flow', key: 'hubLogStep' } as const, '', { sh
 const hubFrame = atom({ plugin: 'flow', key: 'hubFrame' } as const, 0, { shape: 'hub-frame-1' })
 const hubEnv = atom({ plugin: 'flow', key: 'hubEnv' } as const, {} as HubEnv, { shape: 'hub-env-1' })
 const hubHidden = atom({ plugin: 'flow', key: 'hubHidden' } as const, [] as string[], { shape: 'hub-hidden-1' })
+const hubLocals = atom({ plugin: 'flow', key: 'hubLocals' } as const, {} as Record<string, string>, { shape: 'hub-locals-1' })
 
 // The workflows this person hid from the Workflows page, by id. Kept in the
 // plugin's store (theirs, across sessions), never in a shared flows.yaml.
@@ -115,6 +117,13 @@ export async function hubSessionStart($: $, found: Found[]): Promise<void> {
   await checkEnv($, found).catch(() => undefined)
   const hidden = await storedHidden($)
   await update($, hubHidden, () => hidden)
+  await loadLocals($).catch(() => undefined)
+}
+
+/** The person's stored locals into the hub: at session start and after each change. */
+export async function loadLocals($: $, values?: Record<string, string>): Promise<void> {
+  const stored = values ?? (await readLocals($))
+  await update($, hubLocals, () => stored)
 }
 
 /** A run started (from the hub or Claude's run_workflow): the pane, when not open, opens on it. */

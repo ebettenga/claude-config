@@ -3,11 +3,15 @@
 
 import { load } from './vendor/js-yaml.mjs'
 import { parseInputSearch } from './views'
-import type { AgentSpec, ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow, ModelSpec } from '../types'
+import type { AgentSpec, ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, LocalSpec, LocalType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow, ModelSpec } from '../types'
 
-export type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow }
+export type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, LocalSpec, LocalType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow }
 
 export const INPUT_TYPES = ['text', 'textarea', 'number', 'boolean', 'date', 'select', 'file', 'folder'] as const satisfies readonly InputType[]
+export const LOCAL_TYPES = ['text', 'folder', 'file'] as const satisfies readonly LocalType[]
+export const LOCAL_FIELDS = ['id', 'label', 'type', 'help', 'default'] as const
+/** A local's id: snake_case, the key in ~/.flow/locals.yaml. */
+export const LOCAL_ID_RE = /^[a-z][a-z0-9_]*$/
 export const TIERS = ['light', 'medium', 'careful', 'heavy', 'fable'] as const satisfies readonly Tier[]
 export const STEP_KINDS = ['run', 'agent', 'approve', 'claude', 'wait', 'uses', 'python', 'mcp', 'http', 'model'] as const satisfies readonly StepKind[]
 /** Steps that do work, take a slot, and can be retried and repeated (for_each). */
@@ -174,6 +178,13 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
   if (!ID_RE.test(id)) errors.push(`id: "${id}" must be lowercase letters, digits, - or _`)
   found.id = id
 
+  const locals = parseLocals(doc.locals, errors)
+  const localIds = new Set(locals.map(l => l.id))
+  /** A {{local.x}} in an input's default must name a declared local. */
+  const checkLocalRefs = (text: string, at: string) => {
+    for (const ref of templateRefs(text)) if (ref.kind === 'local' && !localIds.has(ref.name)) errors.push(`${at}: {{local.${ref.name}}} needs ${ref.name} listed under locals:`)
+  }
+
   const inputs: InputSpec[] = []
   const rawInputs = doc.inputs ?? []
   if (!Array.isArray(rawInputs)) errors.push('inputs: must be a list')
@@ -196,6 +207,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
       if (contains.some(c => c.startsWith('/') || c.split('/').includes('..'))) errors.push(`${at}.contains: paths are relative to the folder (no leading / or ..)`)
       if (raw.search !== undefined && type !== 'text') errors.push(`${at}.search: only text inputs take search:`)
       const search = raw.search === undefined ? undefined : parseInputSearch(raw.search, `${at}.search`, errors)
+      if (typeof raw.default === 'string') checkLocalRefs(raw.default, `${at}.default`)
       inputs.push({
         id: inId,
         label: str(raw.label) || inId,
@@ -480,6 +492,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
         if (ref.kind === 'steps' && !known.steps.has(ref.name)) errors.push(`steps[${i}]: {{steps.${ref.name}.${ref.field ?? 'output'}}} names no step`)
         if (ref.kind === 'env' && !isEnvOk) errors.push(`steps[${i}]: {{env.${ref.name}}} only works in ${ENV_TEMPLATE_PLACES} (a run step has $${ref.name})`)
         else if (ref.kind === 'env' && !envNames.includes(ref.name)) errors.push(`steps[${i}]: {{env.${ref.name}}} needs ${ref.name} listed under env:`)
+        if (ref.kind === 'local' && !localIds.has(ref.name)) errors.push(`steps[${i}]: {{local.${ref.name}}} needs ${ref.name} listed under locals:`)
         if (ref.kind === 'json') errors.push(`steps[${i}]: {{${ref.name}}} is not a JSON path (use steps.<id>.json, then .key and [n], as in steps.fetch.json.orders[0].total)`)
         if (ref.kind === 'item' && !isItemOk) errors.push(`steps[${i}]: {{${ref.name}}} only works in a for_each step's command, prompt, cwd or outputs`)
         if (ref.kind === 'filter') errors.push(`steps[${i}]: {{${ref.name}}} uses "${ref.field}", which is not a filter (use ${FILTERS.join(' or ')})`)
@@ -491,6 +504,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
     for (const ref of conditionRefs(parsed.node)) {
       if (ref[0] === 'inputs' && !known.inputs.has(ref[1] ?? '')) errors.push(`steps[${i}].if: inputs.${ref[1]} names no input`)
       if (ref[0] === 'steps' && !known.steps.has(ref[1] ?? '')) errors.push(`steps[${i}].if: steps.${ref[1]} names no step`)
+      if (ref[0] === 'local' && !localIds.has(ref[1] ?? '')) errors.push(`steps[${i}].if: local.${ref[1]} names no local`)
     }
   })
 
@@ -505,6 +519,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
       for (const ref of conditionRefs(parsed.node)) {
         if (ref[0] === 'inputs' && !known.inputs.has(ref[1] ?? '')) errors.push(`hide_when: inputs.${ref[1]} names no input`)
         if (ref[0] === 'steps' && !known.steps.has(ref[1] ?? '')) errors.push(`hide_when: steps.${ref[1]} names no step`)
+        if (ref[0] === 'local' && !localIds.has(ref[1] ?? '')) errors.push(`hide_when: local.${ref[1]} names no local`)
       }
     }
   }
@@ -516,12 +531,38 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
     owner: str(doc.owner),
     tags: strList(doc.tags),
     env: envNames,
+    locals,
     inputs,
     steps,
     outputs: parseOutputs(doc.outputs, errors),
     ...(hideWhen ? { hideWhen } : {}),
   }
   return found
+}
+
+/** Top-level `locals:`: values each person sets for themselves; problems go to `errors` by field. */
+export function parseLocals(raw: unknown, errors: string[]): LocalSpec[] {
+  const locals: LocalSpec[] = []
+  if (raw === undefined || raw === null) return locals
+  if (!Array.isArray(raw)) {
+    errors.push('locals: must be a list')
+    return locals
+  }
+  raw.forEach((item, i) => {
+    const at = `locals[${i}]`
+    if (!isObj(item)) return void errors.push(`${at}: must be a mapping with id (and label, type, help, default)`)
+    for (const k of Object.keys(item)) if (!(LOCAL_FIELDS as readonly string[]).includes(k)) errors.push(`${at}.${k}: is not a locals field (use ${LOCAL_FIELDS.join(', ')})`)
+    const id = str(item.id)
+    if (!LOCAL_ID_RE.test(id)) errors.push(`${at}.id: "${id}" must be snake_case (lowercase letters, digits or _, starting with a letter)`)
+    if (locals.some(x => x.id === id)) errors.push(`${at}.id: "${id}" is used twice`)
+    const type = (str(item.type) || 'text') as LocalType
+    if (!LOCAL_TYPES.includes(type)) errors.push(`${at}.type: "${type}" must be one of ${LOCAL_TYPES.join(', ')}`)
+    if (isObj(item.default) || Array.isArray(item.default)) errors.push(`${at}.default: must be a single value`)
+    const def = item.default === undefined || item.default === null ? '' : str(item.default)
+    if (def.includes('{{')) errors.push(`${at}.default: cannot hold a template`)
+    locals.push({ id, label: str(item.label) || id, type, help: str(item.help), default: def })
+  })
+  return locals
 }
 
 const fileName = (p: string) => p.replace(/\/+$/, '').split('/').pop() || p
@@ -597,13 +638,15 @@ function hasCycle(steps: StepSpec[]): boolean {
   return steps.some(s => visit(s.id))
 }
 
-type Ref = { kind: 'inputs' | 'steps' | 'run' | 'item' | 'env' | 'json' | 'filter' | 'bad'; name: string; field?: string }
+type Ref = { kind: 'inputs' | 'steps' | 'run' | 'item' | 'env' | 'local' | 'json' | 'filter' | 'bad'; name: string; field?: string }
 
 /** A template's reference and filters: `inputs.x | sh` → ['inputs.x', ['sh']]. */
 function splitTemplate(expr: string): { ref: string; filters: string[] } {
   const [ref = '', ...filters] = expr.split('|').map(p => p.trim())
   return { ref, filters }
 }
+
+const LOCAL_REF_RE = /^local\.([A-Za-z0-9_]+)$/
 
 function templateRefs(text: string, itemNames: string[] = []): Ref[] {
   const refs: Ref[] = []
@@ -619,11 +662,13 @@ function templateRefs(text: string, itemNames: string[] = []): Ref[] {
     const step = /^steps\.([A-Za-z0-9_-]+)\.(output|files|dir)$/.exec(ref)
     const json = JSON_PATH_RE.exec(ref)
     const env = /^env\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(ref)
+    const local = LOCAL_REF_RE.exec(ref)
     if (input?.[1]) refs.push({ kind: 'inputs', name: input[1] })
     else if (step?.[1]) refs.push({ kind: 'steps', name: step[1], field: step[2] })
     else if (json?.[1]) refs.push({ kind: 'steps', name: json[1], field: 'json' })
     else if (/^steps\.[A-Za-z0-9_-]+\.json\b/.test(ref)) refs.push({ kind: 'json', name: expr })
     else if (env?.[1]) refs.push({ kind: 'env', name: env[1] })
+    else if (local?.[1]) refs.push({ kind: 'local', name: local[1] })
     else if (ref === 'run.dir') refs.push({ kind: 'run', name: ref })
     else if (ref === 'item' || ref === 'item_index' || itemNames.includes(ref)) refs.push({ kind: 'item', name: ref })
     else refs.push({ kind: 'bad', name: expr })
@@ -643,6 +688,8 @@ export type TemplateContext = {
   item?: { value: string; index: number; as: string }
   /** {{env.NAME}} values (python, mcp and http steps only); absent, env templates stay as written. */
   env?: Record<string, string>
+  /** {{local.<id>}} values, as the run resolved them; one not here stays as written. */
+  locals?: Record<string, string>
 }
 
 /** Quotes a value for bash: 'it'\''s'. */
@@ -683,6 +730,8 @@ function resolveRef(ref: string, ctx: TemplateContext): string | undefined {
   if (json?.[1]) return jsonText(atJsonPath(parseJson(ctx.outputs[json[1]] ?? ''), jsonPathParts(json[2] ?? '')))
   const env = /^env\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(ref)
   if (env?.[1]) return ctx.env && env[1] in ctx.env ? ctx.env[env[1]] : undefined
+  const local = LOCAL_REF_RE.exec(ref)
+  if (local?.[1]) return ctx.locals && local[1] in ctx.locals ? ctx.locals[local[1]] : undefined
   if (ref === 'run.dir') return ctx.runDir
   if (ctx.item && (ref === 'item' || ref === ctx.item.as)) return ctx.item.value
   if (ctx.item && ref === 'item_index') return String(ctx.item.index)
@@ -691,7 +740,8 @@ function resolveRef(ref: string, ctx: TemplateContext): string | undefined {
 
 /**
  * Fills {{inputs.x}}, {{steps.x.output|files|dir}}, {{steps.x.json.<path>}},
- * {{run.dir}}, {{env.NAME}} (when ctx.env has it) and, in a for_each step,
+ * {{run.dir}}, {{env.NAME}} (when ctx.env has it), {{local.x}} (when
+ * ctx.locals has it) and, in a for_each step,
  * {{item}}, {{<as>}} and {{item_index}}; `| sh` quotes the value
  * for bash and `| json` makes it a JSON string. Anything else is left as written.
  */
@@ -707,6 +757,11 @@ export function fill(text: string, ctx: TemplateContext): string {
     }
     return value
   })
+}
+
+/** Fills only the {{local.x}} templates (filters too) of a text; everything else stays as written. */
+export function fillLocals(text: string, locals: Record<string, string>): string {
+  return text.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (whole, expr: string) => (LOCAL_REF_RE.test(splitTemplate(expr).ref) ? fill(whole, { inputs: {}, outputs: {}, runDir: '', locals }) : whole))
 }
 
 // ---------------------------------------------------------------------------
@@ -812,9 +867,10 @@ export function parseCondition(text: string): { node?: CondNode; error?: string 
       const path = t.v.split('.')
       if (!t.v.includes('[')) {
         if (path[0] === 'inputs' && path.length === 2 && path[1]) return { k: 'ref', path }
+        if (path[0] === 'local' && path.length === 2 && path[1]) return { k: 'ref', path }
         if (path[0] === 'steps' && path.length === 3 && path[1] && STEP_FIELDS.includes(path[2] ?? '')) return { k: 'ref', path }
       }
-      throw new Error(`"${t.v}" is not a reference (use inputs.<id>, steps.<id>.status, steps.<id>.output, steps.<id>.exit or steps.<id>.json.<path>)`)
+      throw new Error(`"${t.v}" is not a reference (use inputs.<id>, local.<id>, steps.<id>.status, steps.<id>.output, steps.<id>.exit or steps.<id>.json.<path>)`)
     }
     const unary = (): CondNode => {
       if (isOp('!')) {
@@ -856,7 +912,7 @@ export function parseCondition(text: string): { node?: CondNode; error?: string 
   }
 }
 
-/** The references a condition makes: ['inputs', id] or ['steps', id, field]. */
+/** The references a condition makes: ['inputs', id], ['local', id] or ['steps', id, field]. */
 export function conditionRefs(node: CondNode): string[][] {
   switch (node.k) {
     case 'ref':
@@ -882,6 +938,8 @@ export function checksStatus(node: CondNode): boolean {
 
 export type ConditionScope = {
   inputs: Record<string, string>
+  /** The run's resolved locals (local.<id>); absent, each is empty. */
+  locals?: Record<string, string>
   steps: Record<string, { status: string; output: string; exit: string; json?: unknown }>
   /** The statuses of the step's `after` steps. */
   after: string[]
@@ -899,6 +957,7 @@ function valueOf(node: CondNode, scope: ConditionScope): Value {
     case 'ref': {
       const [root, id = '', field = ''] = node.path
       if (root === 'inputs') return scope.inputs[id] ?? ''
+      if (root === 'local') return scope.locals?.[id] ?? ''
       const step = scope.steps[id]
       if (field === 'json') {
         const v = atJsonPath(step ? (step.json !== undefined ? step.json : parseJson(step.output)) : null, node.json ?? [])
@@ -961,8 +1020,12 @@ export function untilTime(text: string, now: Date): number | undefined {
 const pad2 = (n: number) => String(n).padStart(2, '0')
 const isoDay = (d: Date) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 
-/** An input's starting value: its default, with date words (today, yesterday, last-monday) resolved. */
-export function defaultValue(input: InputSpec, now = new Date()): string {
+/**
+ * An input's starting value: its default, with date words (today, yesterday,
+ * last-monday) resolved and, given `locals`, its {{local.x}} templates filled.
+ */
+export function defaultValue(input: InputSpec, now = new Date(), locals?: Record<string, string>): string {
+  if (locals && input.default.includes('{{')) return defaultValue({ ...input, default: fillLocals(input.default, locals) }, now)
   if (input.type === 'boolean') return input.default === 'true' ? 'true' : 'false'
   if (input.type === 'select' && input.multiple) return input.default
   if (input.type === 'select') return input.options.includes(input.default) || input.remember ? input.default || (input.options[0] ?? '') : input.options[0] ?? ''

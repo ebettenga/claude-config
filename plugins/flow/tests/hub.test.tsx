@@ -104,10 +104,13 @@ steps:
 `
 
 type Proc = { command: string; finish: (code: number) => void }
+/** One repo's git for the mock: its porcelain status, branch and how far behind it is. */
+type GitRepo = { status: string; branch: string; behind: number }
 
 /** Files in memory, children the test ends, prompt fills recorded. */
 // `isTrackingPanes`: ui.panes answers with the panes opened and not closed since.
-function world(on: On, files: Record<string, string>, env: Record<string, string> = {}, isTrackingPanes = false) {
+// `git`: each repo folder's git, as the mock answers it (git argv are kept in `git`).
+function world(on: On, files: Record<string, string>, env: Record<string, string> = {}, isTrackingPanes = false, repos: Record<string, GitRepo> = {}) {
   const clock = mock.clock(on, { now: new Date(2026, 9, 28, 12, 0, 0).getTime() })
   const vars: Record<string, string> = { HOME, ...env }
   mock.env(on, vars)
@@ -135,7 +138,37 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
     throw new Error(`no such file: ${e.path}`)
   })
   const ran = (stdout: string, exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+  const git: { argv: string[]; cwd?: string }[] = []
   on('process.run', (_, e) => {
+    if (e.argv[0] === 'git') {
+      const argv = e.argv.slice(1)
+      git.push({ argv, cwd: e.init?.cwd })
+      const r = repos[e.init?.cwd ?? '']
+      const out = (exitCode: number, stdout = '', stderr = '') => ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } })
+      if (!r) return out(128, '', 'fatal: not a git repository')
+      switch (argv[0]) {
+        case 'status':
+          return out(0, r.status)
+        case 'branch':
+          return out(0, `${r.branch}\n`)
+        case 'symbolic-ref':
+          return out(0, 'refs/remotes/origin/main\n')
+        case 'rev-list':
+          return out(0, `0\t${r.behind}\n`)
+        case 'remote':
+          return out(0, 'git@gitlab.com:org/flows.git\n')
+        case 'config':
+          return out(0, 'Ethan Bettenga\n')
+        case 'rev-parse':
+          return argv[1] === '--git-path' ? out(0, `.git/${argv[2]}\n`) : out(0, 'c0ffee1\n')
+        case 'push':
+          return out(0, '', 'remote:   https://gitlab.com/org/flows/-/merge_requests/42\n')
+        case 'merge-base':
+          return out(1)
+        default:
+          return out(0)
+      }
+    }
     // Spotlight: mdfind -onlyin <home> '<expr>', answered from the files in memory.
     if (e.argv[0] === 'mdfind') {
       const expr = e.argv[3] ?? ''
@@ -187,7 +220,7 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   const runIds = (wf: string) => [...fs.keys()].filter(k => k.startsWith(`${RUNS}/${wf}/`) && k.endsWith('/run.json')).map(k => k.split('/').slice(-2)[0] ?? '')
   const runFile = (wf: string, id: string) => JSON.parse(fs.get(`${RUNS}/${wf}/${id}/run.json`) ?? 'null') as Run
-  return { clock, fs, procs, fills, panes, store, runIds, runFile }
+  return { clock, fs, procs, fills, panes, store, runIds, runFile, git }
 }
 
 async function begin($: Engine, surface: (typeof SURFACES)[number]) {
@@ -1078,6 +1111,133 @@ for (const surface of SURFACES) {
     expect(at('in:pick:client:')).toBeGreaterThan(-1)
     expect(at('in:pick:client:')).toBeLessThan(at('run-workflow'))
     expect(at('run-workflow')).toBeLessThan(at('desc:pick'))
+    await ui.unmount()
+  })
+}
+
+// Your settings (locals) and the team sync strip.
+const WITH_LOCALS = `
+title: With locals
+locals:
+  - id: aws_profile
+    label: AWS profile
+    help: The profile your AWS commands use.
+  - id: region
+    label: Region
+    default: us-east-1
+steps:
+  - id: list
+    run: aws --profile {{local.aws_profile}} ls
+`
+
+for (const surface of SURFACES) {
+  test(`Your settings: the unset local is counted, set from its Input into ~/.flow/locals.yaml, and the run form shows it (${surface})`, async ($, on) => {
+    const w = world(on, { [`${FLOWS}/loc/flow.yaml`]: WITH_LOCALS, [`${FLOWS}/csv/flow.yaml`]: CSV })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await texts(ui)).toContain('Set in Your settings: AWS profile')
+    const button = await ui.find({ type: 'Button', key: 'settings' })
+    expect(button?.props.variant).toBe('primary')
+    expect(await ui.find({ type: 'Button', key: 'settings', text: /Settings · 1 to set/ })).toBeTruthy()
+    await ui.press({ key: 'settings' })
+    let all = await texts(ui)
+    expect(all).toContain('Only on this Mac, in ~/.flow/locals.yaml. Never shared; not for secrets.')
+    // Unset first, then by label.
+    expect(all.indexOf('AWS profile')).toBeLessThan(all.indexOf('Region'))
+    expect(all).toContain('Used by: With locals')
+    expect((await ui.find({ type: 'Input', key: 'local:region' }))?.props.placeholder).toBe('us-east-1')
+    expect((await ui.find({ type: 'Input', key: 'local:aws_profile' }))?.props.placeholder).toBe('not set')
+
+    await ui.input({ key: 'local:aws_profile', text: 'kh-dev', kind: 'submit' })
+    await w.clock.settle()
+    expect(w.fs.get(`${HOME}/.flow/locals.yaml`)).toMatch(/aws_profile: kh-dev/)
+    expect((await ui.find({ type: 'Input', key: 'local:aws_profile' }))?.props.value).toBe('kh-dev')
+    all = await texts(ui)
+    expect(all).not.toContain('Set in Your settings')
+    expect(await ui.find({ type: 'Button', key: 'settings', text: /to set/ })).toBeFalsy()
+
+    // The run form: each local's value, and Edit for the rows.
+    await ui.press({ key: 'run:loc' })
+    all = await texts(ui)
+    expect(all).toContain('Your settings')
+    expect(all).toContain('kh-dev')
+    expect(all).toContain('us-east-1')
+    expect(await ui.find({ type: 'Input', key: 'local:region' })).toBeFalsy()
+    await ui.press({ key: 'edit-settings' })
+    expect(await ui.find({ type: 'Input', key: 'local:region' })).toBeTruthy()
+    await ui.unmount()
+  })
+
+  test(`Your settings with no locals declared says so; the run form shows not set (${surface})`, async ($, on) => {
+    world(on, { [`${FLOWS}/csv/flow.yaml`]: CSV })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Button', key: 'settings' }))?.props.variant).not.toBe('primary')
+    await ui.press({ key: 'settings' })
+    expect(await texts(ui)).toContain('No workflow uses settings yet.')
+    await ui.unmount()
+  })
+
+  test(`the sync strip: behind and changed, Share lists items, a guardrail problem disables it, and sharing pushes a flow-share branch (${surface})`, async ($, on) => {
+    const repo: GitRepo = { status: ' M loc/flow.yaml\0?? loc/notes.md\0', branch: 'main', behind: 2 }
+    const w = world(
+      on,
+      {
+        [`${FLOWS}/.git/HEAD`]: 'x',
+        [`${FLOWS}/loc/flow.yaml`]: WITH_LOCALS,
+        [`${FLOWS}/loc/notes.md`]: 'see /Users/bob/repo\n',
+      },
+      {},
+      false,
+      { [FLOWS]: repo },
+    )
+    await begin($, surface)
+    // The first background fetch, a second after the session starts.
+    await w.clock.advance(1_000)
+    await w.clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await texts(ui)).toContain('↓ 2 new · 1 changed by you')
+    expect(await ui.find({ type: 'Button', key: 'sync-pull:local' })).toBeTruthy()
+    expect((await ui.find({ type: 'Button', key: 'sync-share:local' }))?.props.variant).toBe('primary')
+    let mark = w.git.length
+    await ui.press({ key: 'sync-pull:local' })
+    await w.clock.settle()
+    expect(w.git.slice(mark).some(g => g.argv[0] === 'pull' && g.cwd === FLOWS)).toBe(true)
+
+    await ui.press({ key: 'sync-share:local' })
+    await w.clock.settle()
+    let all = await texts(ui)
+    expect(all).toContain('Share · flows'.toUpperCase())
+    expect(all).toContain('1 added · 1 changed')
+    expect(all).toContain('loc/notes.md:1  hard-coded personal path')
+    await ui.input({ key: 'share-msg', text: 'Add notes', kind: 'change' })
+    // Off: drawn dim, and a press shares nothing.
+    expect((await ui.find({ type: 'Button', key: 'share-go' }))?.props.dimColor).toBe(true)
+    mark = w.git.length
+    await ui.press({ key: 'share-go' })
+    await w.clock.settle()
+    expect(w.git.slice(mark).some(g => g.argv[0] === 'push' || g.argv[0] === 'commit')).toBe(false)
+
+    // Fixed: the changes are checked again, and the button opens the merge request.
+    w.fs.set(`${FLOWS}/loc/notes.md`, 'see ~/repo\n')
+    repo.status = ' M loc/flow.yaml\0 M loc/notes.md\0'
+    await w.clock.advance(5 * 60_000)
+    await w.clock.settle()
+    await texts(ui)
+    await w.clock.settle()
+    all = await texts(ui)
+    expect(all).toContain('2 changed')
+    expect(all).not.toContain('hard-coded personal path')
+    expect((await ui.find({ type: 'Button', key: 'share-go' }))?.props.variant).toBe('primary')
+    mark = w.git.length
+    await ui.press({ key: 'share-go' })
+    await w.clock.settle()
+    const push = w.git.slice(mark).find(g => g.argv[0] === 'push')
+    expect(push?.cwd).toBe(FLOWS)
+    expect(push?.argv).toContain('merge_request.create')
+    expect(push?.argv).toContain('merge_request.title=Add notes')
+    expect(push?.argv.at(-1)).toMatch(/^HEAD:refs\/heads\/flow-share\/ethan-bettenga\//)
+    expect(await ui.find({ type: 'Button', key: 'share-go' })).toBeFalsy()
     await ui.unmount()
   })
 }

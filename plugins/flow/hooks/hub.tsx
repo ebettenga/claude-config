@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { ChartData, Found, FoundView, HubAttempts, HubCatalog, HubEnv, HubForms, HubInputSearch, HubOpenResults, HubPicker, HubTab, InputOption, InputSpec, Layout, LayoutGroup, Run, StepRun, StepSpec, ViewAction, ViewSection, ViewSpec, ViewState, Workflow } from '../types'
+import type { ChartData, Found, FoundView, HubAttempts, HubCatalog, HubEnv, HubForms, HubInputSearch, HubOpenResults, HubPicker, HubTab, InputOption, InputSpec, Layout, LayoutGroup, LocalSpec, RepoSync, Run, ShareProblem, StepRun, StepSpec, ViewAction, ViewSection, ViewSpec, ViewState, Workflow } from '../types'
 import { LOGO_TEXT_PARTS, logoSvg } from './brand'
 import { MAX_RESULT_BYTES, SERIES, chartAlt, chartFromJson, chartFromTable, chartSvg, drawnPart, tableMarkdown, tableOf, textBars } from './charts'
 import type { Table } from './charts'
@@ -51,13 +51,15 @@ import {
   tildify,
   tint,
 } from './hub-parts'
-import { checkEnv, openHub, setHidden, showRun, showWorkflow } from './hub-state'
+import { checkEnv, loadLocals, openHub, setHidden, showRun, showWorkflow } from './hub-state'
+import { declaredLocals, resolveLocals, setLocal } from './locals'
 import { SVG } from './icons'
 import { agentsView } from './progress'
 import { cancelRun, decideStep, inputPick, inputSearch, pullSources, refreshWorkflows, rerun, resumeRun, saveLayout, startRun, tabOf, tabRange, viewAction, viewOpen, viewRange, viewSearch, viewTab } from './runner'
 import { activeFilters, fillView, formDefaults, getPath, pickRows, withFilter } from './views'
 import { OTHER, addGroup, arrange, moveGroup, moveWorkflow, removeGroup, renameGroup, setGroup } from './layout'
 import type { Section } from './layout'
+import { pullRepo, refreshSync, shareProblems, shareRepo } from './sync'
 import { STEP_KINDS, cleanTerminal, defaultValue, fill, inputProblems, isAIStep, stepLevels } from './spec'
 
 type $ = EngineInterface
@@ -100,6 +102,16 @@ const hubArrange = atom({ plugin: 'flow', key: 'hubArrange' } as const, false, {
 const hubFolded = atom({ plugin: 'flow', key: 'hubFolded' } as const, {} as Record<string, boolean>, { shape: 'hub-folded-1' })
 /** Workflows this person hid from the Workflows page (hub-state.ts keeps them in the store). */
 const hubHidden = atom({ plugin: 'flow', key: 'hubHidden' } as const, [] as string[], { shape: 'hub-hidden-1' })
+/** sync.ts's repo status, and the hub's own sync and settings state. */
+const syncAtom = atom({ plugin: 'flow', key: 'sync' } as const, {} as Record<string, RepoSync>, { shape: 'sync-1' })
+const hubSettings = atom({ plugin: 'flow', key: 'hubSettings' } as const, false, { shape: 'hub-settings-1' })
+const hubEditLocals = atom({ plugin: 'flow', key: 'hubEditLocals' } as const, false, { shape: 'hub-edit-locals-1' })
+const hubLocals = atom({ plugin: 'flow', key: 'hubLocals' } as const, {} as Record<string, string>, { shape: 'hub-locals-1' })
+const hubShare = atom({ plugin: 'flow', key: 'hubShare' } as const, '', { shape: 'hub-share-1' })
+const hubShareMsg = atom({ plugin: 'flow', key: 'hubShareMsg' } as const, '', { shape: 'hub-share-msg-1' })
+const hubShareError = atom({ plugin: 'flow', key: 'hubShareError' } as const, '', { shape: 'hub-share-error-1' })
+const hubShareChecks = atom({ plugin: 'flow', key: 'hubShareChecks' } as const, {} as Record<string, ShareProblem[]>, { shape: 'hub-share-checks-1' })
+const hubSyncBusy = atom({ plugin: 'flow', key: 'hubSyncBusy' } as const, {} as Record<string, string>, { shape: 'hub-sync-busy-1' })
 /** The Hidden section's key in hubFolded: no group title can be empty, so it never meets one. */
 const HIDDEN_FOLD = ''
 
@@ -176,6 +188,92 @@ async function readResult($: $, abs: string): Promise<{ text?: string; problem?:
   return { text }
 }
 
+// ── team sync and settings ───────────────────────────────────────────────
+
+/** A repo's changes in one string: Share's guardrail check is kept against it. */
+const shareKey = (s: RepoSync) => `${s.repo.name}\n${s.changes.map(c => `${c.kind}:${c.path}`).join('\n')}`
+
+const errText = (err: unknown) => String((err as Error)?.message ?? err).split('\n')[0] ?? 'error'
+
+function setBusy($: $, name: string, label: string) {
+  return update($, hubSyncBusy, all => {
+    const rest = Object.fromEntries(Object.entries(all).filter(([k]) => k !== name))
+    return label ? { ...rest, [name]: label } : rest
+  })
+}
+
+/** Pull pressed: rebase the repo onto the team's work, then read the workflows and its status again. */
+async function pullOne($: $, s: RepoSync): Promise<void> {
+  await setBusy($, s.repo.name, 'Pulling…')
+  try {
+    const { error } = await pullRepo($, s.repo)
+    await refresh($).catch(() => undefined)
+    await refreshSync($).catch(() => undefined)
+    $.ui.toast(error ? `${s.repo.title}: pull failed: ${error}` : `${s.repo.title}: pulled`)
+  } finally {
+    await setBusy($, s.repo.name, '')
+  }
+}
+
+const checking = new Set<string>()
+
+/** The guardrail problems for a repo's changes as they are now: once per change, not per draw. */
+async function checkShare($: $, s: RepoSync): Promise<void> {
+  const key = shareKey(s)
+  if (checking.has(key)) return
+  checking.add(key)
+  try {
+    const problems = await shareProblems($, s.repo, s).catch(() => [] as ShareProblem[])
+    // Only the open card's check is kept.
+    await update($, hubShareChecks, () => ({ [key]: problems }))
+  } finally {
+    checking.delete(key)
+  }
+}
+
+async function openShare($: $, s: RepoSync): Promise<void> {
+  await update($, hubShareError, () => '')
+  await update($, hubShare, () => s.repo.name)
+  await checkShare($, s)
+}
+
+async function closeShare($: $): Promise<void> {
+  await update($, hubShare, () => '')
+  await update($, hubShareMsg, () => '')
+  await update($, hubShareError, () => '')
+}
+
+/** Open merge request pressed: share, then close the card; a failure stays on it. */
+async function shareOne($: $, s: RepoSync): Promise<void> {
+  const message = await read($, hubShareMsg)
+  await setBusy($, s.repo.name, 'Sharing…')
+  await update($, hubShareError, () => '')
+  try {
+    const r = await shareRepo($, s.repo, message)
+    if (r.problems?.length) await update($, hubShareChecks, () => ({ [shareKey(s)]: r.problems ?? [] }))
+    if (r.error) {
+      await update($, hubShareError, () => r.error ?? '')
+      return
+    }
+    await closeShare($)
+    $.ui.toast(r.url ? `Shared: ${r.url}${r.note ? ` · ${r.note}` : ''}` : (r.note ?? `Shared to ${r.branch}`))
+    await refreshSync($).catch(() => undefined)
+  } catch (err) {
+    await update($, hubShareError, () => errText(err))
+  } finally {
+    await setBusy($, s.repo.name, '')
+  }
+}
+
+/** A setting submitted: written to ~/.flow/locals.yaml, then the hub redraws with it. */
+async function saveLocal($: $, id: string, value: string): Promise<void> {
+  try {
+    await loadLocals($, await setLocal($, id, value))
+  } catch (err) {
+    $.ui.toast(`Not saved: ${errText(err)}`)
+  }
+}
+
 // ── register ─────────────────────────────────────────────────────────────
 
 
@@ -233,11 +331,24 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       read($, hubFolded),
     ])
     const [views, viewStates, viewId, searches, hiddenIds] = await Promise.all([read($, viewsAtom), read($, viewStatesAtom), read($, hubView), read($, hubInputSearch), read($, hubHidden)])
+    const [sync, isSettingsOpen, isEditingLocals, stored, shareName, shareMsg, shareError, shareChecks, syncBusy] = await Promise.all([
+      read($, syncAtom),
+      read($, hubSettings),
+      read($, hubEditLocals),
+      read($, hubLocals),
+      read($, hubShare),
+      read($, hubShareMsg),
+      read($, hubShareError),
+      read($, hubShareChecks),
+      read($, hubSyncBusy),
+    ])
     const now = await $.clock.now()
     const cwd = await $.session.cwd().catch(() => '')
     const home = ((await $.env.get('HOME').catch(() => undefined)) ?? '').replace(/\/+$/, '')
     const loaded = found.filter((f): f is Found & { workflow: Workflow } => Boolean(f.workflow))
     const active = runs.filter(r => r.status === 'running' || r.status === 'waiting')
+    const declared = declaredLocals(found)
+    const isUnsetLocal = (spec: LocalSpec) => !(stored[spec.id] ?? '').trim() && !spec.default.trim()
     const agentsRunning = agentList.filter(a => a.status === 'running').length
     const gap = isDesktop ? 'md' : 1
 
@@ -855,16 +966,18 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           )
       const sources = layout.sources ?? []
       const where = sources.length ? `${workflowsDir} + ${plural(sources.length, 'source')}` : workflowsDir
-      const pullButton = sources.length
-        ? <Button key="pull" plain onPress={() => void pullSources($).then(lines => $.ui.toast(lines.join(' · '))).catch(() => undefined)}>Pull</Button>
-        : null
+      const toSet = declared.filter(d => isUnsetLocal(d.spec)).length
+      const settingsButton = toSet
+        ? <Button key="settings" variant="primary" onPress={() => void update($, hubSettings, v => !v)}>{`Settings · ${toSet} to set`}</Button>
+        : <Button key="settings" plain onPress={() => void update($, hubSettings, v => !v)}>Settings</Button>
       const head = (
         <Box flexDirection="row" alignItems="center" gap={1}>
           <Box flexGrow={1} flexShrink={1} minWidth={0}>{heading('Workflows', `${loaded.length} · ${where}`)}</Box>
-          {pullButton}
+          {settingsButton}
           {arrangeButton}
         </Box>
       )
+      const shared = shareName ? sync[shareName] : undefined
       const problems = layout.errors.length
         ? card('layout-errors', [
             <Text size="footnote" weight="bold" color={C.del}>{`FLOWS.YAML HAS ${plural(layout.errors.length, 'PROBLEM')}`}</Text>,
@@ -907,6 +1020,9 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       return [
         search,
         head,
+        syncStrip(sources.length > 0),
+        shared ? shareCard(shared) : null,
+        isSettingsOpen ? settingsCard('settings-card', declared) : null,
         problems,
         ...body,
         isArranging && !needle ? newGroupRow() : null,
@@ -926,6 +1042,155 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
     function hiddenWhy(wf: Workflow): 'hidden' | 'auto' | undefined {
       if (hiddenIds.includes(wf.id)) return 'hidden'
       return isAutoHidden(wf, runs) ? 'auto' : undefined
+    }
+
+    // ── team sync ──
+
+    /** One row per synced repo: where it stands, and Pull or Share when there is something to do. */
+    function syncStrip(hasSources: boolean) {
+      const repos = Object.values(sync)
+      if (!repos.length) return null
+      return (
+        <Box key="sync" flexDirection="column" gap="xs">
+          {repos.map(syncRow)}
+          {/* Pull all also clones a source that is not here yet. */}
+          {hasSources
+            ? (
+                <Box key="sync-all" flexDirection="row">
+                  <Button key="pull" plain onPress={() => void pullSources($).then(lines => $.ui.toast(lines.join(' · '))).catch(() => undefined)}>Pull all</Button>
+                </Box>
+              )
+            : null}
+        </Box>
+      )
+    }
+
+    function syncRow(s: RepoSync) {
+      const name = s.repo.name
+      const items = new Set(s.changes.map(c => c.item)).size
+      const waiting = s.pending.filter(p => !p.merged)
+      const parts: string[] = []
+      if (s.behind > 0) parts.push(`↓ ${s.behind} new`)
+      if (items) parts.push(`${items} changed by you`)
+      parts.push(...waiting.map(p => (p.url ? `[waiting to merge](${p.url})` : 'waiting to merge')))
+      if (!parts.length) parts.push('up to date')
+      const line = parts.join(' · ')
+      const busy = syncBusy[name]
+      return (
+        <Box key={`sync:${name}`} flexDirection="row" alignItems="center" gap={1}>
+          <Box flexDirection="row" flexWrap="wrap" alignItems="center" gap={1} flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text weight="semibold" size="footnote">{s.repo.title}</Text>
+            {waiting.some(p => p.url) ? <Markdown key={`sync-line:${name}`} dimColor text={line} /> : <Text dimColor size="footnote">{line}</Text>}
+            {s.branch !== s.defaultBranch ? <Text color={C.dirty} size="footnote">{`on ${s.branch || 'a detached HEAD'}`}</Text> : null}
+            {s.error ? <Text color={C.del} size="footnote">{s.error}</Text> : null}
+          </Box>
+          {busy
+            ? <Text dimColor size="footnote">{busy}</Text>
+            : (
+                <Box flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+                  {s.behind > 0 ? <Button key={`sync-pull:${name}`} plain onPress={() => void pullOne($, s).catch(() => undefined)}>Pull</Button> : null}
+                  {s.changes.length ? <Button key={`sync-share:${name}`} variant="primary" onPress={() => void openShare($, s).catch(() => undefined)}>Share</Button> : null}
+                </Box>
+              )}
+        </Box>
+      )
+    }
+
+    function shareCard(s: RepoSync) {
+      const name = s.repo.name
+      const problems = shareChecks[shareKey(s)]
+      // The changes moved since the card opened: check them again (once, not every draw).
+      if (!problems) void checkShare($, s).catch(() => undefined)
+      const byItem = new Map<string, { added: number; changed: number; deleted: number }>()
+      for (const c of s.changes) {
+        const n = byItem.get(c.item) ?? { added: 0, changed: 0, deleted: 0 }
+        if (c.kind === 'added' || c.kind === 'untracked') n.added++
+        else if (c.kind === 'deleted') n.deleted++
+        else n.changed++
+        byItem.set(c.item, n)
+      }
+      const busy = syncBusy[name]
+      const canShare = Boolean(problems && !problems.length && shareMsg.trim() && !busy)
+      return card(`share:${name}`, [
+        heading(`Share · ${s.repo.title}`),
+        <Text dimColor size="footnote">Opens a merge request that merges on its own once its checks pass. Your changes stay on this Mac meanwhile.</Text>,
+        ...[...byItem].map(([item, n]) => (
+          <Box key={`share-item:${item}`} flexDirection="row" alignItems="center" gap={1} flexWrap="wrap">
+            <Text weight="semibold">{item}</Text>
+            <Text dimColor size="footnote">{[n.added ? `${n.added} added` : '', n.changed ? `${n.changed} changed` : '', n.deleted ? `${n.deleted} deleted` : ''].filter(Boolean).join(' · ')}</Text>
+          </Box>
+        )),
+        problems
+          ? problems.map((p, i) => <Text key={`share-problem:${i}`} color={C.del} size="footnote">{`${p.path}${p.line ? `:${p.line}` : ''}  ${p.problem}`}</Text>)
+          : <Text dimColor size="footnote">Checking your changes…</Text>,
+        Input
+          ? <Input key="share-msg" value={shareMsg} placeholder="What changed, in a sentence" onInput={(v: string) => void update($, hubShareMsg, () => v)} onSubmit={(v: string) => void update($, hubShareMsg, () => v)} />
+          : null,
+        shareError ? <Text color={C.del} size="footnote">{shareError}</Text> : null,
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          {busy
+            ? <Text dimColor size="footnote">{busy}</Text>
+            : canShare
+              ? <Button key="share-go" variant="primary" onPress={() => void shareOne($, s).catch(() => undefined)}>Open merge request</Button>
+              // A Button has no disabled state: drawn dim, and a press does nothing.
+              : <Button key="share-go" plain dimColor onPress={() => undefined}>Open merge request</Button>}
+          <Button key="share-cancel" plain onPress={() => void closeShare($)}>Cancel</Button>
+        </Box>,
+      ])
+    }
+
+    // ── Your settings (locals) ──
+
+    function settingsCard(key: string, list: { spec: LocalSpec; usedBy: string[] }[]) {
+      const rows = [...list].sort((a, b) => Number(isUnsetLocal(b.spec)) - Number(isUnsetLocal(a.spec)) || a.spec.label.localeCompare(b.spec.label))
+      return card(key, [
+        heading('Your settings'),
+        <Text dimColor size="footnote">Only on this Mac, in ~/.flow/locals.yaml. Never shared; not for secrets.</Text>,
+        ...(rows.length ? rows.map(localRow) : [<Text dimColor size="footnote">No workflow uses settings yet.</Text>]),
+      ])
+    }
+
+    function localRow({ spec, usedBy }: { spec: LocalSpec; usedBy: string[] }) {
+      const titles = usedBy.map(id => loaded.find(f => f.id === id)?.workflow.title ?? id)
+      const value = stored[spec.id] ?? ''
+      return (
+        <Box key={`local-row:${spec.id}`} flexDirection="column" gap="xs">
+          <Box flexDirection="row" alignItems="center" gap={1} flexWrap="wrap">
+            {isUnsetLocal(spec) ? <Text color={C.dirty} weight="bold">!</Text> : null}
+            <Text weight="semibold">{spec.label}</Text>
+            <Text dimColor size="caption">{spec.id}</Text>
+          </Box>
+          {Input
+            ? <Input key={`local:${spec.id}`} value={value} placeholder={spec.default || 'not set'} onSubmit={(v: string) => void saveLocal($, spec.id, v)} />
+            : <Text>{value || spec.default || 'not set'}</Text>}
+          {spec.help ? <Text dimColor size="footnote">{spec.help}</Text> : null}
+          <Text dimColor size="caption">{`Used by: ${titles.join(', ')}`}</Text>
+        </Box>
+      )
+    }
+
+    /** The run form's settings: each local's value, and Edit for the rows to change them. */
+    function localsBlock(wf: Workflow): RenderChildren[] {
+      if (!wf.locals.length) return []
+      const mine = wf.locals.map(spec => ({ spec, usedBy: declared.find(d => d.spec.id === spec.id)?.usedBy ?? [wf.id] }))
+      return [
+        <Box key="locals" flexDirection="column" gap="xs">
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Box flexGrow={1} flexShrink={1} minWidth={0}><Text weight="bold" size="footnote">Your settings</Text></Box>
+            <Button key="edit-settings" plain onPress={() => void update($, hubEditLocals, v => !v)}>Edit</Button>
+          </Box>
+          {wf.locals.map(spec => {
+            const value = (stored[spec.id] ?? '').trim() || spec.default.trim()
+            return (
+              <Box key={`local-value:${spec.id}`} flexDirection="row" gap={1} flexWrap="wrap">
+                <Text size="footnote">{spec.label}</Text>
+                {value ? <Text dimColor size="footnote">{value}</Text> : <Text color={C.dirty} size="footnote">not set</Text>}
+              </Box>
+            )
+          })}
+        </Box>,
+        isEditingLocals ? settingsCard('settings-inline', mine) : null,
+      ]
     }
 
     // ── groups (flows.yaml) ──
@@ -1020,6 +1285,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const last = lastRunLine(runs, wf.id, now)
       const { fixed, ai } = stepCounts(wf)
       const unset = wf.env.filter(n => env[n] === false)
+      const missingLocals = resolveLocals(wf, stored, home).missing
       const why = hiddenWhy(wf)
       // A hide_when: workflow comes back by itself when a run no longer meets it.
       const hideButton = why === 'auto' ? null : <Button key={`hide:${wf.id}`} plain onPress={() => void setHidden($, wf.id, !why)}>{why ? 'Unhide' : 'Hide'}</Button>
@@ -1049,6 +1315,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           <Text color={last.color} size="footnote" weight="medium">{last.text}</Text>
         </Box>,
         unset.length ? note(`env:${wf.id}`, '!', `Needs ${unset.join(', ')} in your environment`, C.dirty) : null,
+        missingLocals.length ? note(`locals:${wf.id}`, '!', `Set in Your settings: ${missingLocals.map(l => l.label).join(', ')}`, C.dirty) : null,
         why === 'auto' ? note(`auto:${wf.id}`, '✓', 'Hidden while its last run meets its hide_when; it comes back when one does not', C.add) : null,
       ])
     }
@@ -1091,7 +1358,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           <Text dimColor size="footnote">{[wf.owner, wf.tags.join(', '), `${fixed} fixed, ${ai} AI step${ai === 1 ? '' : 's'}`].filter(Boolean).join(' · ')}</Text>
         </Box>,
         // The inputs come first, with Run right under them, so filling the form and running it is one place.
-        wf.inputs.length ? card('inputs', [heading('Inputs', String(wf.inputs.length)), ...fields, actions], {}) : actions,
+        ...(wf.inputs.length ? [card('inputs', [heading('Inputs', String(wf.inputs.length)), ...localsBlock(wf), ...fields, actions], {})] : [...localsBlock(wf), actions]),
         problems.length ? <Box flexDirection="column" gap="xs">{problems.map((p, i) => note(`problem:${i}`, '!', p, C.dirty))}</Box> : null,
         wf.description ? <Markdown key={`desc:${wf.id}`} text={wf.description} /> : null,
         chartCard(wf),

@@ -215,12 +215,32 @@ export type Workflow = {
   owner: string
   tags: string[]
   env: string[]
+  /** `locals:` values each person sets for themselves (in ~/.flow/locals.yaml); `[]` when there are none. */
+  locals: LocalSpec[]
   inputs: InputSpec[]
   steps: StepSpec[]
   /** What the run leaves for people: shown after a run (Markdown rendered, CSVs as tables or charts). */
   outputs: OutputSpec[]
   /** `hide_when:` a condition on the latest finished run; true hides the workflow from the Workflows page. */
   hideWhen?: string
+}
+
+export type LocalType = 'text' | 'folder' | 'file'
+
+/**
+ * One `locals:` entry: a value that differs per person (a repo folder, an AWS
+ * profile name), kept in ~/.flow/locals.yaml and never in the workflow. Not for
+ * secrets: those stay in `env:`.
+ */
+export type LocalSpec = {
+  /** snake_case; the key in ~/.flow/locals.yaml, shared by every workflow that declares it. */
+  id: string
+  /** Default: the id. */
+  label: string
+  type: LocalType
+  help: string
+  /** A suggestion used while the person has not set one; '' for none. */
+  default: string
 }
 
 export type ChartType = 'bar' | 'line'
@@ -320,6 +340,8 @@ export type Run = {
   /** The run folder: ~/.flow/runs/<workflowId>/<runId>/ */
   dir: string
   inputs: Record<string, string>
+  /** The workflow's locals as this run resolved them (absent when it declares none). */
+  locals?: Record<string, string>
   status: RunStatus
   startedAt: number
   endedAt?: number
@@ -552,6 +574,26 @@ declare module 'claude-code' {
       hubArrange: Shaped<boolean>
       /** Groups folded shut on the Workflows page, by title. */
       hubFolded: Shaped<Record<string, boolean>>
+      /** Workflows this person hid from the Workflows page, by id (kept in the plugin's store). */
+      hubHidden: Shaped<string[]>
+      /** Each synced git repo's last status, by repo name (`local` for the flows folder). */
+      sync: Shaped<Record<string, RepoSync>>
+      /** The Your settings card open on the Workflows page. */
+      hubSettings: Shaped<boolean>
+      /** The run form's inline copy of Your settings open. */
+      hubEditLocals: Shaped<boolean>
+      /** The person's locals as stored in ~/.flow/locals.yaml, by id. */
+      hubLocals: Shaped<Record<string, string>>
+      /** The repo whose Share card is open, by name ('' when closed). */
+      hubShare: Shaped<string>
+      /** The Share card's message. */
+      hubShareMsg: Shaped<string>
+      /** The Share card's last error ('' for none). */
+      hubShareError: Shaped<string>
+      /** Share guardrail problems, by `<repo>\n<signature of its changes>`. */
+      hubShareChecks: Shaped<Record<string, ShareProblem[]>>
+      /** A pull or share in flight, by repo name: the label shown instead of its button. */
+      hubSyncBusy: Shaped<Record<string, string>>
     }
   }
 }
@@ -589,3 +631,59 @@ export type SourceState = Source & {
 
 /** flows.yaml, read: the groups, the sources, and what in it is wrong. */
 export type Layout = { groups: LayoutGroup[]; errors: string[]; file?: string; sources?: SourceState[] }
+
+/** A git repo of workflows the hub keeps in sync: the flows folder or a source. */
+export type SyncRepo = {
+  /** `local` for the flows folder, else the source's name. */
+  name: string
+  /** the flows folder's own folder name, or the source's title */
+  title: string
+  path: string
+  isSource: boolean
+}
+
+/** One changed file in a synced repo, as git status names it. */
+export type SyncChange = {
+  /** relative to the repo; the new path of a rename */
+  path: string
+  kind: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
+  /** the top-level folder (a workflow or view id), or the file name of a root file */
+  item: string
+}
+
+/** A Share whose merge request has not reached the default branch yet. */
+export type PendingShare = {
+  /** the flow-share/... branch pushed */
+  branch: string
+  /** the commit shared */
+  commit: string
+  /** the merge request, when GitLab answered with one */
+  url?: string
+  message: string
+  /** when, in ms */
+  at: number
+}
+
+/** A synced repo as last checked. */
+export type RepoSync = {
+  repo: SyncRepo
+  /** the checked-out branch ('' when detached) */
+  branch: string
+  /** origin/HEAD's branch, else origin/main or origin/master; `main` when none is known */
+  defaultBranch: string
+  /** false when neither origin/HEAD, origin/main nor origin/master is there (Share refuses; `error` says so) */
+  isDefaultBranchKnown: boolean
+  /** commits upstream has that this clone does not */
+  behind: number
+  /** commits here not upstream yet (a Share waiting on its merge request) */
+  ahead: number
+  changes: SyncChange[]
+  pending: PendingShare[]
+  /** what went wrong last: git status, a fetch or a pull */
+  error?: string
+  /** when this was checked, in ms */
+  checkedAt: number
+}
+
+/** Why a Share is refused: a file (and line) and what is wrong there. */
+export type ShareProblem = { path: string; line?: number; problem: string }

@@ -257,7 +257,7 @@ export function isAutoHidden(wf: Workflow, runs: Run[]): boolean {
   if (!last || !cond.node) return false
   const steps: ConditionScope['steps'] = {}
   for (const s of last.steps) steps[s.id] = { status: s.status, output: s.output, exit: s.exitCode === undefined ? '' : String(s.exitCode) }
-  return evalCondition(cond.node, { inputs: last.inputs, steps, after: [] })
+  return evalCondition(cond.node, { inputs: last.inputs, locals: last.locals ?? {}, steps, after: [] })
 }
 
 /** Units of work: a step, or each item of a for_each step. */
@@ -318,7 +318,7 @@ export function lastRunLine(runs: Run[], workflowId: string, now: number): { tex
 export function outputContext(run: Run): TemplateContext {
   const outputs: Record<string, string> = {}
   for (const s of run.steps) if (s.status === 'done') outputs[s.id] = s.output
-  return { inputs: run.inputs, outputs, runDir: run.dir }
+  return { inputs: run.inputs, outputs, runDir: run.dir, locals: run.locals ?? {} }
 }
 
 /** A workflow's top-level outputs as mappings: a run's older workflow.json holds plain paths. */
