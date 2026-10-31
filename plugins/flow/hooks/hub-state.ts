@@ -1,4 +1,4 @@
-// The /flow-board hub pane's state, and what the runner calls on it (at
+// The /workflow hub pane's state, and what the runner calls on it (at
 // session start, when a run starts, on the 250 ms tick). Nothing here imports
 // the runner, so the runner can import this.
 
@@ -90,7 +90,7 @@ export async function showWorkflow($: $, workflowId: string): Promise<void> {
 /** From the runner's session.start, once the workflows and runs are read. */
 export async function hubSessionStart($: $, found: Found[]): Promise<void> {
   await $.command.register({
-    name: 'flow-board',
+    name: 'workflow',
     description: 'Open the flow chart: your workflows, their runs, and the skills and agents Claude can use',
     argumentHint: '[workflow id]',
   })

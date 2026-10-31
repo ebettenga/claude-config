@@ -106,7 +106,7 @@ export function parseSources(text: string, homeDir: string): { sources: Source[]
 
 /** The file's text for these groups; `sources` (as the file had them) are kept as they were. */
 export function layoutYaml(groups: LayoutGroup[], sources?: unknown): string {
-  const head = '# How /flow-board groups and orders the workflows. Workflows no group lists come last, under Other.\n'
+  const head = '# How /workflow groups and orders the workflows. Workflows no group lists come last, under Other.\n'
   const body: Record<string, unknown> = { groups: groups.map(g => ({ title: g.title, workflows: g.workflows })) }
   if (Array.isArray(sources) && sources.length) body.sources = sources
   return head + dump(body, { flowLevel: 3, lineWidth: 120 })
