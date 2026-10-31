@@ -1,4 +1,4 @@
-// The /workflow hub pane's state, and what the runner calls on it (at
+// The /flowboard hub pane's state, and what the runner calls on it (at
 // session start, when a run starts, on the 250 ms tick). Nothing here imports
 // the runner, so the runner can import this.
 
@@ -58,7 +58,7 @@ export async function showAgents($: $): Promise<void> {
   await openHub($)
 }
 
-/** The bar's agents button and /flow-agents: closes the hub when it is up on Agents, else shows Agents. */
+/** The bar's agents button and /flowcrew: closes the hub when it is up on Agents, else shows Agents. */
 export async function toggleAgents($: $): Promise<boolean> {
   const isUp = await $.ui.panes().then(panes => panes.some(p => p.id === PANE)).catch(() => false)
   if (isUp && (await read($, hubTab)) === 'agents') {
@@ -90,7 +90,7 @@ export async function showWorkflow($: $, workflowId: string): Promise<void> {
 /** From the runner's session.start, once the workflows and runs are read. */
 export async function hubSessionStart($: $, found: Found[]): Promise<void> {
   await $.command.register({
-    name: 'workflow',
+    name: 'flowboard',
     description: 'Open the flow chart: your workflows, their runs, and the skills and agents Claude can use',
     argumentHint: '[workflow id]',
   })

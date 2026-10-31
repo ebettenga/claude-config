@@ -38,7 +38,7 @@ function engine(on: Parameters<Parameters<typeof test>[1]>[1], listed = '') {
       ] }
     return { value: [{ name: 'app.ts', kind: 'file', size: 10, mtimeMs: t, isLink: false }] }
   })
-  on('command.register', () => ({ value: { command: 'filedeck' } }))
+  on('command.register', () => ({ value: { command: 'flowfiles' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('fs.read', () => ({ value: '# notes\nhello\n' }))
   on('prompt.fill', () => ({ value: { text: '', cursor: 0 } }))
@@ -47,7 +47,7 @@ function engine(on: Parameters<Parameters<typeof test>[1]>[1], listed = '') {
 
 test('files tab: badges, folder change count, Claude touched', async ($, on) => {
   engine(on)
-  await $.command.run({ command: 'filedeck', args: '' })
+  await $.command.run({ command: 'flowfiles', args: '' })
   await $.tool.call({ tool: 'Read', file_path: '/repo/notes.md' })
 
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -70,7 +70,7 @@ test('files tab: badges, folder change count, Claude touched', async ($, on) => 
 
 test('search lists matching files', async ($, on) => {
   engine(on, 'src/app.ts\nnotes.md\n')
-  await $.command.run({ command: 'filedeck', args: '' })
+  await $.command.run({ command: 'flowfiles', args: '' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.input({ key: 'find', text: 'app', kind: 'change' })
   expect(await ui.find({ type: 'Text', text: /^app\.ts$/ })).toBeTruthy()
@@ -80,7 +80,7 @@ test('search lists matching files', async ($, on) => {
 
 test('selecting a file opens its diff, and File shows its text', async ($, on) => {
   engine(on)
-  await $.command.run({ command: 'filedeck', args: '' })
+  await $.command.run({ command: 'flowfiles', args: '' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'f:/repo/src' })
   await ui.press({ key: 'f:/repo/src/app.ts' })
@@ -97,7 +97,7 @@ test('selecting a file opens its diff, and File shows its text', async ($, on) =
 test('a file Claude reads opens the tree to it and keeps a read mark', async ($, on) => {
   engine(on)
   on('ui.scroll', () => ({ value: {} }))
-  await $.command.run({ command: 'filedeck', args: '' })
+  await $.command.run({ command: 'flowfiles', args: '' })
   await $.tool.call({ tool: 'Read', file_path: '/repo/src/app.ts' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   // src opened by itself, and app.ts carries the read mark.
@@ -109,7 +109,7 @@ test('a file Claude reads opens the tree to it and keeps a read mark', async ($,
 test('clicking a file in Claude touched opens its viewer there, with Mention', async ($, on) => {
   engine(on)
   on('ui.scroll', () => ({ value: {} }))
-  await $.command.run({ command: 'filedeck', args: '' })
+  await $.command.run({ command: 'flowfiles', args: '' })
   await $.tool.call({ tool: 'Read', file_path: '/repo/src/app.ts' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'tb:/repo/src/app.ts' })

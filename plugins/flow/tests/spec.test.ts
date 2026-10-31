@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import { addGroup, arrange, layoutYaml, moveGroup, moveWorkflow, parseLayout, parseSources, rawSources, removeGroup, renameGroup, setGroup } from '../hooks/layout'
-import { checksStatus, defaultValue, evalCondition, fill, inputProblems, isAIStep, parseCondition, parseWorkflow, shQuote, splitArgs, stepEnvNames, stepLevels, untilTime } from '../hooks/spec'
+import { checksStatus, cleanTerminal, defaultValue, evalCondition, fill, inputProblems, isAIStep, parseCondition, parseWorkflow, shQuote, splitArgs, stepEnvNames, stepLevels, untilTime } from '../hooks/spec'
 import type { ConditionScope } from '../hooks/spec'
 import type { InputSpec, Workflow } from '../types'
 
@@ -754,4 +754,13 @@ steps:
   expect(bad).toContain('inputs[1].search.mcp.args: none uses {{query}}, the text typed')
   expect(bad).toContain('inputs[1].search: "{{row...}}" names nothing; use {{item.<field>}}')
   expect(bad).toContain('inputs[1].search.colour: is not a field (mcp, items, value, title, subtitle, limit, min)')
+})
+
+describe('cleanTerminal', () => {
+  test('drops escape codes and control characters, and keeps what a terminal would show after \\r', () => {
+    expect(cleanTerminal('\x1b[90m 38 |\x1b[39m code\n\x1b]0;title\x07done')).toBe(' 38 | code\ndone')
+    expect(cleanTerminal('Pulling 10%\rPulling 50%\rPulling 100%\r\nok\x07\x00')).toBe('Pulling 100%\nok')
+    expect(cleanTerminal('tab\tkept')).toBe('tab\tkept')
+    expect(cleanTerminal('x'.repeat(600))).toBe(`${'x'.repeat(500)}…`)
+  })
 })

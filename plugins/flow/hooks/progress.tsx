@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderChildren } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
 
 import type { AgentRun, Flow, Panel, Phase, PlannedTask } from '../types'
 import { LOGO_TEXT_PARTS, logoMark } from './brand'
@@ -13,6 +13,8 @@ const panel = atom({ plugin: 'flow', key: 'progressPanel' } as const, {
   autoOpenedFor: '',
 })
 const now = atom({ plugin: 'flow', key: 'progressNow' } as const, 0)
+/** The agents' clock tick: one at a time, or each session.start adds another. */
+let agentsTimer: Timer | undefined
 
 const TOOL = 'mcp__flow__progress'
 const STEP_TOOL = 'mcp__flow__step'
@@ -832,7 +834,7 @@ async function togglePane($: EngineInterface): Promise<boolean> {
   return toggleAgents($)
 }
 
-// The `autoOpen` option: `flow` (the default), `any`, or `off` (only /flow-agents opens it).
+// The `autoOpen` option: `flow` (the default), `any`, or `off` (only /flowcrew opens it).
 // Module scope is fine here: registerProgress sets it again on every (re)load.
 let autoOpenMode: unknown = 'flow'
 
@@ -1088,12 +1090,13 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
       isDeferred: false,
     })
     await $.command.register({
-      name: 'flow-agents',
+      name: 'flowcrew',
       description: 'Show or hide the Agents tab of the flow chart: subagents running, finished and planned, with model, context, cost and time',
     })
 
     // Ticks the running agents' clocks; quiet when nothing runs.
-    $.clock.every(1000, () => {
+    agentsTimer?.cancel()
+    agentsTimer = $.clock.every(1000, () => {
       void (async () => {
         const list = await read($, agents)
         if (!list.some(a => a.status === 'running')) return
@@ -1104,8 +1107,8 @@ export function registerProgress(on: Parameters<Register>[0], options: Record<st
     return started
   })
 
-  on('command.run', { command: 'flow-agents' }, async ($, e) => {
-    // `/flow-agents open` opens the panel, or brings it forward from behind another tab, without toggling it.
+  on('command.run', { command: 'flowcrew' }, async ($, e) => {
+    // `/flowcrew open` opens the panel, or brings it forward from behind another tab, without toggling it.
     if ((e.args ?? '').trim() === 'open') {
       const at = await $.clock.now()
       await update($, now, () => at)

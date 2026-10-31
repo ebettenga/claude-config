@@ -632,6 +632,28 @@ export type TemplateContext = {
 /** Quotes a value for bash: 'it'\''s'. */
 export const shQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`
 
+// CSI (colours, cursor moves), OSC (titles, links) and two-byte escapes.
+const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g
+const LINE_MAX = 500
+
+/**
+ * Terminal output as plain text the pane can draw: escape codes gone, each line
+ * as a terminal would leave it after carriage returns, other control characters
+ * dropped, and lines cut at 500 characters. Code and Text refuse any control
+ * character but tab and newline, and one refused element blanks the whole pane.
+ */
+export function cleanTerminal(s: string): string {
+  return s
+    .replace(ANSI, '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map(line => {
+      const shown = line.slice(line.lastIndexOf('\r') + 1).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '')
+      return shown.length > LINE_MAX ? `${shown.slice(0, LINE_MAX)}…` : shown
+    })
+    .join('\n')
+}
+
 function resolveRef(ref: string, ctx: TemplateContext): string | undefined {
   const input = /^inputs\.([A-Za-z0-9_]+)$/.exec(ref)
   if (input?.[1]) return ctx.inputs[input[1]] ?? ''

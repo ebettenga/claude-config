@@ -1,4 +1,4 @@
-// What the /workflow hub draws with: its palette, the step-kind colors,
+// What the /flowboard hub draws with: its palette, the step-kind colors,
 // formatting, the svg strings, a run's outputs and the skills/agents catalog.
 // No elements here: hooks/hub.tsx draws.
 

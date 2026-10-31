@@ -94,6 +94,8 @@ const cloneTried = new Set<string>()
 const pulls = new Map<string, { at: number; error?: string }>()
 let sessionCwd: string | undefined
 let isHydrated = false
+/** The hub's frame tick: one at a time, or each session.start (a /clear, a resume) adds another. */
+let hubTimer: Timer | undefined
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) : s)
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T
@@ -2153,7 +2155,7 @@ async function registerTools($: $): Promise<void> {
     description:
       `Start a run of a saved flow workflow by its id (from list_workflows). ${where} ` +
       'Inputs are strings keyed by input id; inputs left out take their defaults. Returns the run id, or the problems (missing required inputs, unset env variables, missing files) and nothing starts. ' +
-      'The run goes on in the background; the user watches it in /workflow and you can check it with run_status.',
+      'The run goes on in the background; the user watches it in /flowboard and you can check it with run_status.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2210,14 +2212,14 @@ async function registerTools($: $): Promise<void> {
   await $.tool.register({
     name: 'list_views',
     description:
-      `List the flow views the user can open on the /workflow Views tab. A view (view.yaml, beside workflows in ${workflowsDir} and its sources) is a search, a list and a detail page over MCP tool calls, such as a team's listener or customer lookup. ` +
+      `List the flow views the user can open on the /flowboard Views tab. A view (view.yaml, beside workflows in ${workflowsDir} and its sources) is a search, a list and a detail page over MCP tool calls, such as a team's listener or customer lookup. ` +
       'Returns JSON: id, source, title, description, whether it has a search, its filters, its detail sections, and errors. Use it before open_view.',
     inputSchema: { type: 'object', properties: {} },
   })
   await $.tool.register({
     name: 'open_view',
     description:
-      'Open a flow view on the /workflow Views tab for the user. With query (and optionally filter), it runs the view\'s search and returns the rows it found with their keys. ' +
+      'Open a flow view on the /flowboard Views tab for the user. With query (and optionally filter), it runs the view\'s search and returns the rows it found with their keys. ' +
       'With key, it opens that item\'s detail page and returns what the page shows as text (each section\'s numbers and lines), so you can answer questions about it too. ' +
       'Use it when the user asks to look someone or something up in a view, e.g. "show me listener 4004" or "find listeners named Sam".',
     inputSchema: {
@@ -2290,7 +2292,8 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     // would have to name every case again.
     await hubSessionStart($, await read($, workflowsAtom)).catch(() => undefined)
     try {
-      $.clock.every(250, () => void read($, runsAtom).then(runs => hubTick($, runs)).catch(() => undefined))
+      hubTimer?.cancel()
+      hubTimer = $.clock.every(250, () => void read($, runsAtom).then(runs => hubTick($, runs)).catch(() => undefined))
     } catch {
       // No timer here (a test kit): the hub's shimmer stands still.
     }
@@ -2317,7 +2320,7 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     const raw = input.inputs && typeof input.inputs === 'object' && !Array.isArray(input.inputs) ? (input.inputs as Record<string, unknown>) : {}
     const { run, problems } = await startRun($, str(input.id), raw)
     if (!run) return { result: `Not started:\n${problems.map(p => `- ${p}`).join('\n')}` }
-    return { result: `Started run ${run}. Watch it in /workflow, or check it with run_status.\n\n${await runStatusText($, run)}` }
+    return { result: `Started run ${run}. Watch it in /flowboard, or check it with run_status.\n\n${await runStatusText($, run)}` }
   })
 
   on('tool.call', { tool: 'mcp__flow__run_status' }, async ($, e) => ({ result: await runStatusText($, str((e as unknown as { run?: unknown }).run)) }))
@@ -2402,7 +2405,7 @@ export function registerRunner(on: Parameters<Register>[0], options: Record<stri
     if (!list || list.state !== 'ok') return { result: `error: ${list?.state === 'error' ? list.message : 'the search did not run'}` }
     const { items, total } = list.value as { items: unknown[]; total: number }
     const rows = items.map(item => `- ${getPath(item, view.list.key)}: ${fillView(view.list.rows.text, { item })}${view.list.rows.subtitle ? ` (${fillView(view.list.rows.subtitle, { item })})` : ''}`)
-    return { result: [`${total} found${total > items.length ? `, showing ${items.length}` : ''}. Opened in /workflow. Keys first; open_view with key opens one.`, ...rows].join('\n') }
+    return { result: [`${total} found${total > items.length ? `, showing ${items.length}` : ''}. Opened in /flowboard. Keys first; open_view with key opens one.`, ...rows].join('\n') }
   })
 
   on('tool.call', { tool: 'mcp__flow__validate_workflow' }, async ($, e) => ({ result: await validateText($, str((e as unknown as { path?: unknown }).path)) }))

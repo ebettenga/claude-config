@@ -1,7 +1,7 @@
 {
   "name": "flow",
   "version": "0.1.0",
-  "description": "A work hub for Claude Code: an orchestrator that plans and delegates to tiered workers, YAML workflows that mix scripts and Claude, and /workflow to see and run them.",
+  "description": "A work hub for Claude Code: an orchestrator that plans and delegates to tiered workers, YAML workflows that mix scripts and Claude, and /flowboard to see and run them.",
   "author": {
     "name": "Ethan Bettenga"
   },
@@ -17,7 +17,7 @@
     "autoOpen": {
       "type": "string",
       "title": "Open the Agents tab",
-      "description": "flow: open the flow chart on its Agents tab when flow workers start; any: for any subagent; off: only with /flow-agents.",
+      "description": "flow: open the flow chart on its Agents tab when flow workers start; any: for any subagent; off: only with /flowcrew.",
       "default": "flow",
       "options": [
         "flow",

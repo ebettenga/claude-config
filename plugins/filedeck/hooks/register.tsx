@@ -361,7 +361,7 @@ const GIT_VERB: Array<[RegExp, string]> = [
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'filedeck', description: 'Open the Filedeck pane: files, what Claude touched, and git' })
+    await $.command.register({ name: 'flowfiles', description: 'Open the Filedeck pane: files, what Claude touched, and git' })
     void refreshGit($)
     $.clock.every(15_000, () => void refreshGit($))
     $.clock.every(250, () => void read($, touched).then(list => (list.some(t => t.isActive) ? update($, frame, n => (n + 1) % 1200) : undefined)))
@@ -369,7 +369,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'filedeck' }, async $ => {
+  on('command.run', { command: 'flowfiles' }, async $ => {
     await refreshGit($)
     await openPane($)
     return { text: 'Filedeck opened.' }

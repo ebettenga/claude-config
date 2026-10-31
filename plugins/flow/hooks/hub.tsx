@@ -1,4 +1,4 @@
-// The /workflow hub pane: the workflows (find, read, fill in and run one),
+// The /flowboard hub pane: the workflows (find, read, fill in and run one),
 // their runs (a live step chart, logs, approvals, outputs) and everything
 // Claude can use (workflows, skills, agents). Laid out after
 // design/flow-chart-mockup.png; the terminal draws the same content as rows.
@@ -57,7 +57,7 @@ import { cancelRun, decideStep, inputPick, inputSearch, pullSources, refreshWork
 import { activeFilters, fillView, formDefaults, getPath, pickRows, withFilter } from './views'
 import { OTHER, addGroup, arrange, moveGroup, moveWorkflow, removeGroup, renameGroup, setGroup } from './layout'
 import type { Section } from './layout'
-import { STEP_KINDS, defaultValue, fill, inputProblems, isAIStep, stepLevels } from './spec'
+import { STEP_KINDS, cleanTerminal, defaultValue, fill, inputProblems, isAIStep, stepLevels } from './spec'
 
 type $ = EngineInterface
 
@@ -182,7 +182,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
   // The command is registered and the env checked from the runner's
   // session.start (hubSessionStart), and a run opens the pane from startRun.
 
-  on('command.run', { command: 'workflow' }, async ($, e) => {
+  on('command.run', { command: 'flowboard' }, async ($, e) => {
     const found = await refresh($)
     const id = (e.args ?? '').trim()
     const hit = id ? found.find(f => f.id === id && f.workflow) : undefined
@@ -1615,7 +1615,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const at = (st: StepRun) => st.id.replace(/[_-]+/g, ' ')
       const failed = r.steps.find(s => s.status === 'failed')
       if (failed) {
-        const why = firstLine(failed.error ?? '') || firstLine(failed.tail.trim().split('\n').slice(-1)[0] ?? '')
+        const why = firstLine(cleanTerminal(failed.error ?? '')) || firstLine(cleanTerminal(failed.tail).trim().split('\n').slice(-1)[0] ?? '')
         return `failed at ${at(failed)}${why ? `: ${why}` : ''}`
       }
       const waiting = r.steps.find(s => s.status === 'waiting')
@@ -1720,7 +1720,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         const item = itemAt(logStep, index)
         const rec = item ?? logStep
         const isLive = rec.status === 'running' || rec.status === 'waiting'
-        const lines = rec.tail.replace(/\s+$/, '').split('\n')
+        const lines = cleanTerminal(rec.tail).replace(/\s+$/, '').split('\n')
         const tail = lines.slice(-LOG_LINES).join('\n')
         parts.push(
           card('log', [
@@ -1951,11 +1951,11 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
                 : { label: 'not reached', color: C.dim }
       const isWaiting = status === 'waiting'
       const filled = fill(spec.body, outputContext(run)).trim()
-      const tail = (step?.tail ?? '').trim()
+      const tail = cleanTerminal(step?.tail ?? '').trim()
       const logFirst = firstLine(tail)
       const question = !step?.startedAt || !logFirst || firstLine(filled) === logFirst ? filled || logFirst : isWaiting ? tail : logFirst
       const isDecided = status === 'done' || status === 'failed'
-      const output = (step?.output ?? '').trim()
+      const output = cleanTerminal(step?.output ?? '').trim()
       const remark = isDecided && output && output !== 'approved' && output !== 'rejected' ? output : ''
       const when = isDecided && step?.endedAt ? ago(step.endedAt, now) : isWaiting && step?.startedAt ? `asked ${ago(step.startedAt, now)}` : ''
       return tile(`appr:${spec.id}`, {

@@ -186,10 +186,32 @@ function world(on: On, files: Record<string, string>, env: Record<string, string
 
 async function begin($: Engine, surface: (typeof SURFACES)[number]) {
   await $.session.start({ cwd: '/repo', surface, isInteractive: true } as never)
-  await $.command.run({ command: 'workflow', args: '' })
+  await $.command.run({ command: 'flowboard', args: '' })
 }
 
 const texts = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string }[]> }) => (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n')
+
+// Jest and docker colour their output: a tail with escape codes used to blank the whole pane.
+for (const surface of SURFACES) {
+  test(`a run whose log has terminal escape codes still draws (${surface})`, async ($, on) => {
+    const now = new Date(2026, 9, 28, 12, 0, 0).getTime()
+    const id = '20261028-115000-aaaa'
+    const tail = 'PASS a\n\x1b[90m 38 |\x1b[39m code\nPulling 10%\rPulling 100%\n'
+    const run = {
+      id, workflowId: 'csv', title: 'CSV summary', workflowDir: `${FLOWS}/csv`, dir: `${RUNS}/csv/${id}`, inputs: {}, status: 'failed', startedAt: now - 60000, endedAt: now - 1000,
+      steps: [{ id: 'a', status: 'failed', output: '', tail, startedAt: now - 60000, endedAt: now - 1000, exitCode: 1 }],
+    }
+    world(on, { [`${FLOWS}/csv/flow.yaml`]: CSV, [`${RUNS}/csv/${id}/run.json`]: JSON.stringify(run) })
+    await begin($, surface)
+    const ui = await $.ui.mount({ ...PANE, surface })
+    await ui.press({ key: 'tab:runs' })
+    expect(await texts(ui)).toContain('failed at a: Pulling 100%')
+    await ui.press({ key: `open:${id}` })
+    const code = await ui.find({ type: 'Code' } as never)
+    expect((code as unknown as { props: { source: string } }).props.source).toBe('PASS a\n 38 | code\nPulling 100%')
+    await ui.unmount()
+  })
+}
 
 for (const surface of SURFACES) {
   test(`every tab and board draws (${surface})`, { timeoutMs: 20_000 }, async ($, on) => {
@@ -483,15 +505,15 @@ for (const surface of SURFACES) {
   })
 }
 
-test('/workflow <id> opens that workflow', async ($, on) => {
+test('/flowboard <id> opens that workflow', async ($, on) => {
   world(on, { [`${FLOWS}/csv/flow.yaml`]: CSV })
   await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true } as never)
-  const opened = (await $.command.run({ command: 'workflow', args: 'csv' })) as { text: string }
+  const opened = (await $.command.run({ command: 'flowboard', args: 'csv' })) as { text: string }
   expect(opened.text).toBe('Flow chart opened.')
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Button', key: 'run-workflow' })).toBeTruthy()
   await ui.unmount()
-  const missing = (await $.command.run({ command: 'workflow', args: 'ghost' })) as { text: string }
+  const missing = (await $.command.run({ command: 'flowboard', args: 'ghost' })) as { text: string }
   expect(missing.text).toContain('no workflow "ghost"')
 })
 

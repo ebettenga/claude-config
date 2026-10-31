@@ -90,9 +90,9 @@ It copies the portable parts of `~/.claude/settings.json` (plugins, marketplaces
 
 ## flow
 
-`plugins/flow/` is how big tasks get done. `/flow:flow <task>` starts an orchestrator that plans, owns the design, hands the work to tiered workers (`flow-fable`, `flow-heavy`, `flow-careful`, `flow-medium`, `flow-light`) and reviews what they send back. You rarely need to type it: flow starts itself for substantial multi-file work. `/flow-agents` opens a progress bar for the running workers.
+`plugins/flow/` is how big tasks get done. `/flow:flow <task>` starts an orchestrator that plans, owns the design, hands the work to tiered workers (`flow-fable`, `flow-heavy`, `flow-careful`, `flow-medium`, `flow-light`) and reviews what they send back. You rarely need to type it: flow starts itself for substantial multi-file work. `/flowcrew` opens a progress bar for the running workers.
 
-It also runs workflows: YAML files (`flow.yaml`) that mix scripts and Claude steps, seen and run from `/workflow`. They live in `~/Documents/flows`, the private repo [ebettenga/flows](https://github.com/ebettenga/flows), which `install.sh` clones there (the plugin's `workflowsDir` option can point elsewhere); a project's own `.flows/` folder is read too.
+It also runs workflows: YAML files (`flow.yaml`) that mix scripts and Claude steps, seen and run from `/flowboard`. They live in `~/Documents/flows`, the private repo [ebettenga/flows](https://github.com/ebettenga/flows), which `install.sh` clones there (the plugin's `workflowsDir` option can point elsewhere); a project's own `.flows/` folder is read too.
 
 Agent steps in a workflow run a headless Claude (`claude -p --restricted`) with only the tools, folders and budget the step lists, so they work in auto mode without asking. That `claude` needs its own sign-in once per machine: `claude auth login`.
 
@@ -102,7 +102,7 @@ Agent steps in a workflow run a headless Claude (`claude -p --restricted`) with 
 |---|---|
 | `.claude-plugin/marketplace.json` | The `ethan-claude` marketplace: my own plugins |
 | `plugins/filedeck/` | Filedeck, a file pane with what Claude touched, a badge-styled tree with inline diffs, and a git panel to stage, commit and push |
-| `plugins/flow/` | flow, the orchestrator with tiered workers, YAML workflows and `/workflow` |
+| `plugins/flow/` | flow, the orchestrator with tiered workers, YAML workflows and `/flowboard` |
 | `settings/settings.json` | Portable settings; `{{REPO}}` stands for this folder's path |
 | `settings/mcp.json` | Optional: MCP servers for every project, `${VAR}` for secrets (an export writes one) |
 | `skills/` | User-level skills, `claude-as` among them |
@@ -115,14 +115,14 @@ Agent steps in a workflow run a headless Claude (`claude -p --restricted`) with 
 The `ethan-claude` marketplace is this folder, so installed plugins run straight from `plugins/`. Edit a file, run `/reload-plugins`, and the change is live. Check a plugin with:
 
 ```bash
-claude plugin validate plugins/filedeck
+claude plugin validate plugins/flowfiles
 ```
 
 ```bash
-claude plugin test plugins/filedeck
+claude plugin test plugins/flowfiles
 ```
 
-/filedeck opens the pane.
+/flowfiles opens the pane.
 
 ## Never commit
 
