@@ -6,7 +6,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessSpawnResult, Register, Timer, TurnCompleteInput } from 'claude-code'
 
-import type { Found, FoundView, ItemRun, Layout, LayoutGroup, Run, RunStatus, Source, SourceState, StepRun, StepSpec, StepStatus, Tier, ViewAction, ViewCall, ViewPart, ViewSpec, ViewState, ViewTab, Workflow } from '../types'
+import type { Found, FoundView, HubInputSearch, InputOption, ItemRun, Layout, LayoutGroup, Run, RunStatus, Source, SourceState, StepRun, StepSpec, StepStatus, Tier, ViewAction, ViewCall, ViewPart, ViewSpec, ViewState, ViewTab, Workflow } from '../types'
 import { LAYOUT_FILE, layoutYaml, parseLayout, parseSources, rawSources } from './layout'
 import { VIEW_FILE, activeFilters, fillArgs, fillView, formValues, getPath, listArgs, missingFields, parseResult, parseView, pickRows, rangeOf, shiftAnchor } from './views'
 import { rememberValues } from './file-finder'
@@ -36,6 +36,7 @@ export const layoutAtom = atom({ plugin: 'flow', key: 'layout' } as const, { gro
 export const runsAtom = atom({ plugin: 'flow', key: 'runs' } as const, [], { shape: 'runs-1' })
 export const viewsAtom = atom({ plugin: 'flow', key: 'views' } as const, [] as FoundView[], { shape: 'views-1' })
 export const viewStatesAtom = atom({ plugin: 'flow', key: 'viewStates' } as const, {} as Record<string, ViewState>, { shape: 'view-states-1' })
+export const hubInputSearch = atom({ plugin: 'flow', key: 'hubInputSearch' } as const, {} as HubInputSearch, { shape: 'hub-input-search-1' })
 
 const MAX_RUNS = 30
 /** Run and agent steps (or for_each items) going at once in one run. */
@@ -301,6 +302,47 @@ export async function viewSearch($: $, id: string, query: string, filter?: strin
     list = { state: 'error', message: viewError(err, view.list.call) }
   }
   return setViewState($, id, s => (s.query === query && s.filter === f && s.page === p ? { ...s, list } : s))
+}
+
+/**
+ * A search input's suggestions for what was typed: its call with `{{query}}`
+ * filled, each item made an option. Only the answer to the latest text is kept,
+ * so a slow answer to an earlier keystroke never replaces a newer one.
+ */
+export async function inputSearch($: $, workflowId: string, inputId: string, query: string): Promise<void> {
+  const wf = (await read($, workflowsAtom)).find(f => f.id === workflowId)?.workflow
+  const search = wf?.inputs.find(i => i.id === inputId)?.search
+  if (!search) return
+  const key = `${workflowId}:${inputId}`
+  const q = query.trim()
+  if (q.length < search.min) {
+    await update($, hubInputSearch, all => ({ ...all, [key]: { query: q, state: 'idle' as const, options: [] } }))
+    return
+  }
+  await update($, hubInputSearch, all => ({ ...all, [key]: { query: q, state: 'loading' as const, options: all[key]?.options ?? [] } }))
+  let next: HubInputSearch[string]
+  try {
+    const value = await viewCall($, { ...search.call, args: fillArgs(search.call.args, { query: q }) as Record<string, unknown> }, {})
+    const list = getPath(value, search.items)
+    const options: InputOption[] = (Array.isArray(list) ? list : []).slice(0, search.limit).map(item => {
+      const sub = search.subtitle ? fillView(search.subtitle, { item }) : ''
+      return { value: fillView(search.value, { item }), title: fillView(search.title, { item }), ...(sub ? { subtitle: sub } : {}) }
+    })
+    next = { query: q, state: 'ok' as const, options: options.filter(o => o.value) }
+  } catch (err) {
+    next = { query: q, state: 'error' as const, options: [], message: viewError(err, search.call) }
+  }
+  await update($, hubInputSearch, all => (all[key]?.query === q ? { ...all, [key]: { ...next, ...(all[key]?.picked ? { picked: all[key]?.picked } : {}) } } : all))
+}
+
+/** A search input's pick, or `undefined` to drop it (the person typed again). */
+export async function inputPick($: $, workflowId: string, inputId: string, picked: InputOption | undefined): Promise<void> {
+  const key = `${workflowId}:${inputId}`
+  await update($, hubInputSearch, all => {
+    const cur = all[key] ?? { query: '', state: 'idle' as const, options: [] }
+    const { picked: _, ...rest } = cur
+    return { ...all, [key]: picked ? { ...rest, state: 'idle' as const, options: [], picked } : rest }
+  })
 }
 
 async function todayIso($: $): Promise<string> {

@@ -64,10 +64,42 @@ export type InputSpec = {
   remember: boolean
   /** Folder inputs: files the folder must hold (e.g. package.json); the hub finds folders that do. */
   contains: string[]
+  /** Text inputs: suggestions from an MCP tool as the person types; picking one sets the value. */
+  search?: InputSearch
   default: string
   required: boolean
   help: string
 }
+
+/** A text input's `search:`: the call, with `{{query}}` the text typed, and how each item shows and fills the input. */
+export type InputSearch = {
+  call: ViewCall
+  /** path to the array in the result */
+  items: string
+  /** template for the value a pick puts in the input (`{{item.id}}`) */
+  value: string
+  /** template for each suggestion's line, also shown once it is picked */
+  title: string
+  subtitle?: string
+  limit: number
+  /** characters typed before it searches */
+  min: number
+}
+
+/** One suggestion of a search input. */
+export type InputOption = { value: string; title: string; subtitle?: string }
+
+/** A search input's last search and its pick, by `<workflow id>:<input id>`. */
+export type HubInputSearch = Record<
+  string,
+  {
+    query: string
+    state: 'idle' | 'loading' | 'ok' | 'error'
+    options: InputOption[]
+    message?: string
+    picked?: InputOption
+  }
+>
 
 export type StepSpec = {
   id: string
@@ -498,6 +530,8 @@ declare module 'claude-code' {
       /** Form values by workflow id, then input id. */
       hubForms: Shaped<HubForms>
       hubPicker: Shaped<HubPicker | null>
+      /** Search inputs' suggestions and picks, by `<workflow id>:<input id>`. */
+      hubInputSearch: Shaped<HubInputSearch>
       hubQuery: Shaped<string>
       /** The step whose log shows: a step id, or `id[i]` for an item. */
       hubLogStep: Shaped<string>

@@ -2,6 +2,7 @@
 // so the rules can be tested on their own; register.tsx reads the files.
 
 import { load } from './vendor/js-yaml.mjs'
+import { parseInputSearch } from './views'
 import type { AgentSpec, ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow, ModelSpec } from '../types'
 
 export type { ChartAgg, ChartType, Found, HttpSpec, InputSpec, InputType, McpSpec, OutputChart, OutputSpec, PythonSpec, StepKind, StepSpec, Tier, Workflow }
@@ -193,6 +194,8 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
       const contains = strList(raw.contains)
       if (contains.length && type !== 'folder') errors.push(`${at}.contains: only folder inputs take contains:`)
       if (contains.some(c => c.startsWith('/') || c.split('/').includes('..'))) errors.push(`${at}.contains: paths are relative to the folder (no leading / or ..)`)
+      if (raw.search !== undefined && type !== 'text') errors.push(`${at}.search: only text inputs take search:`)
+      const search = raw.search === undefined ? undefined : parseInputSearch(raw.search, `${at}.search`, errors)
       inputs.push({
         id: inId,
         label: str(raw.label) || inId,
@@ -201,6 +204,7 @@ export function parseWorkflow(text: string, dir: string, file: string): Found {
         accept: strList(raw.accept).map(a => a.toLowerCase()),
         multiple: raw.multiple === true,
         contains,
+        ...(search ? { search } : {}),
         // A multiple select's default may be a list: its values, one per line.
         default: raw.default === undefined || raw.default === null ? '' : Array.isArray(raw.default) ? strList(raw.default).join('\n') : str(raw.default),
         remember,
