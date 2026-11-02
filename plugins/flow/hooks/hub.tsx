@@ -195,6 +195,17 @@ const shareKey = (s: RepoSync) => `${s.repo.name}\n${s.changes.map(c => `${c.kin
 
 const errText = (err: unknown) => String((err as Error)?.message ?? err).split('\n')[0] ?? 'error'
 
+/** Puts an error's raw text on the clipboard, to paste into a terminal. */
+async function copyError($: $, text: string) {
+  try {
+    // pbcopy is macOS only; the text goes as an argument, so quotes and newlines survive.
+    const r = await $.process.run(['bash', '-c', 'printf %s "$1" | pbcopy', '_', text])
+    $.ui.toast(r.exitCode === 0 ? 'Copied error' : 'Copy failed')
+  } catch {
+    $.ui.toast('Copy failed')
+  }
+}
+
 function setBusy($: $, name: string, label: string) {
   return update($, hubSyncBusy, all => {
     const rest = Object.fromEntries(Object.entries(all).filter(([k]) => k !== name))
@@ -533,6 +544,16 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         : <Text key={key} color={color}>{`${glyph} ${text}`}</Text>
     }
 
+    /** An error line as drawn, then a Copy button that copies its raw text. */
+    function copyable(key: string, text: string, line: RenderChildren) {
+      return (
+        <Box key={key} flexDirection="row" gap={1} alignItems="flex-start">
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>{line}</Box>
+          <Button key={`copy:${key}`} plain onPress={() => void copyError($, text)}>Copy</Button>
+        </Box>
+      )
+    }
+
     function tabsRow() {
       return (
         <Box flexDirection="row" gap={1}>
@@ -580,7 +601,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         broken.length
           ? card('view-errors', [
               <Text size="footnote" weight="bold" color={C.del}>{`${plural(broken.length, 'VIEW')} DID NOT LOAD`}</Text>,
-              ...broken.flatMap(v => v.errors.map((err, i) => <Text key={`verr:${v.file}:${i}`} color={C.del} size="footnote">{`${tildify(v.file, home)}: ${err}`}</Text>)),
+              ...broken.flatMap(v => v.errors.map((err, i) => copyable(`verr:${v.file}:${i}`, `${tildify(v.file, home)}: ${err}`, <Text color={C.del} size="footnote">{`${tildify(v.file, home)}: ${err}`}</Text>))),
             ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
           : null,
       ]
@@ -599,6 +620,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         ? card('vnotice', [
             <Box key="vn" flexDirection="row" gap={1} alignItems="center">
               <Box flexGrow={1} flexShrink={1} minWidth={0}><Text color={st.notice.ok ? C.add : C.del} wrap="wrap">{st.notice.text}</Text></Box>
+              {st.notice.ok ? null : <Button key="vn-copy" plain onPress={() => void copyError($, st.notice?.text ?? '')}>Copy</Button>}
               <Button key="vn-x" plain onPress={() => void setState(view.id, s => ({ ...s, notice: undefined }))}>Dismiss</Button>
             </Box>,
           ], { fill: tint(st.notice.ok ? C.add : C.del, '14'), stroke: tint(st.notice.ok ? C.add : C.del, '66') })
@@ -639,7 +661,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       let status: RenderChildren = null
       let pager: RenderChildren = null
       if (!list || list.state === 'loading') status = loading('vst', 'Looking…', 'page')
-      else if (list.state === 'error') status = <Text key="vst" color={C.del} wrap="wrap">{list.message}</Text>
+      else if (list.state === 'error') status = copyable('vst', list.message, <Text color={C.del} wrap="wrap">{list.message}</Text>)
       else {
         const { items, total } = list.value as { items: unknown[]; total: number }
         const limit = view.list.rows.limit
@@ -775,7 +797,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const part = sec.from ? st.detail[sec.from] : undefined
       const parts: RenderChildren[] = [<Text key={`sh:${sk}`} size="footnote" weight="bold" dimColor>{sec.title.toUpperCase()}</Text>]
       if (part?.state === 'loading') parts.push(loading(`sl:${sk}`))
-      else if (part?.state === 'error') parts.push(<Text key={`se:${sk}`} color={C.del} wrap="wrap">{part.message}</Text>)
+      else if (part?.state === 'error') parts.push(copyable(`se:${sk}`, part.message, <Text color={C.del} wrap="wrap">{part.message}</Text>))
       else {
         if (sec.stats.length)
           parts.push(
@@ -981,7 +1003,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
       const problems = layout.errors.length
         ? card('layout-errors', [
             <Text size="footnote" weight="bold" color={C.del}>{`FLOWS.YAML HAS ${plural(layout.errors.length, 'PROBLEM')}`}</Text>,
-            ...layout.errors.map((err, i) => <Text key={`lerr:${i}`} color={C.del} size="footnote">{err}</Text>),
+            ...layout.errors.map((err, i) => copyable(`lerr:${i}`, err, <Text color={C.del} size="footnote">{err}</Text>)),
           ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
         : null
       const sourceGroups = sources.flatMap(src => src.groups)
@@ -1032,7 +1054,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
         broken.length
           ? card('errors', [
               <Text size="footnote" weight="bold" color={C.del}>{`${plural(broken.length, 'WORKFLOW')} DID NOT LOAD`}</Text>,
-              ...broken.flatMap(f => f.errors.map((err, i) => <Text key={`err:${f.file}:${i}`} color={C.del} size="footnote">{`${tildify(f.file, home)}: ${err}`}</Text>)),
+              ...broken.flatMap(f => f.errors.map((err, i) => copyable(`err:${f.file}:${i}`, `${tildify(f.file, home)}: ${err}`, <Text color={C.del} size="footnote">{`${tildify(f.file, home)}: ${err}`}</Text>))),
             ], { fill: tint(C.del, '14'), stroke: tint(C.del, '66') })
           : null,
       ]
@@ -1083,6 +1105,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
             {waiting.some(p => p.url) ? <Markdown key={`sync-line:${name}`} dimColor text={line} /> : <Text dimColor size="footnote">{line}</Text>}
             {s.branch !== s.defaultBranch ? <Text color={C.dirty} size="footnote">{`on ${s.branch || 'a detached HEAD'}`}</Text> : null}
             {s.error ? <Text color={C.del} size="footnote">{s.error}</Text> : null}
+            {s.error ? <Button key={`sync-copy:${name}`} plain onPress={() => void copyError($, s.error ?? '')}>Copy</Button> : null}
           </Box>
           {busy
             ? <Text dimColor size="footnote">{busy}</Text>
@@ -1121,12 +1144,12 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
           </Box>
         )),
         problems
-          ? problems.map((p, i) => <Text key={`share-problem:${i}`} color={C.del} size="footnote">{`${p.path}${p.line ? `:${p.line}` : ''}  ${p.problem}`}</Text>)
+          ? problems.map((p, i) => copyable(`share-problem:${i}`, `${p.path}${p.line ? `:${p.line}` : ''}  ${p.problem}`, <Text color={C.del} size="footnote">{`${p.path}${p.line ? `:${p.line}` : ''}  ${p.problem}`}</Text>))
           : <Text dimColor size="footnote">Checking your changes…</Text>,
         Input
           ? <Input key="share-msg" value={shareMsg} placeholder="What changed, in a sentence" onInput={(v: string) => void update($, hubShareMsg, () => v)} onSubmit={(v: string) => void update($, hubShareMsg, () => v)} />
           : null,
-        shareError ? <Text color={C.del} size="footnote">{shareError}</Text> : null,
+        shareError ? copyable('share-error', shareError, <Text color={C.del} size="footnote">{shareError}</Text>) : null,
         <Box flexDirection="row" alignItems="center" gap={1}>
           {busy
             ? <Text dimColor size="footnote">{busy}</Text>
@@ -1551,7 +1574,7 @@ export function registerHub(on: Parameters<Register>[0], options: Record<string,
             : <Text>{shown || '—'}</Text>}
           {picked ? <Text color={C.add} size="footnote" weight="medium">{`✓ ${[picked.title, picked.subtitle].filter(Boolean).join(' · ')}`}</Text> : null}
           {!picked && st?.state === 'loading' && !options.length ? <Text dimColor size="footnote">Searching…</Text> : null}
-          {!picked && st?.state === 'error' ? note(`serr:${key}`, '!', st.message ?? 'The search failed.', C.dirty) : null}
+          {!picked && st?.state === 'error' ? copyable(`serr:${key}`, st.message ?? 'The search failed.', note(`serr-note:${key}`, '!', st.message ?? 'The search failed.', C.dirty)) : null}
           {!picked && st?.state === 'ok' && !options.length ? <Text dimColor size="footnote">{`Nothing matches “${st.query}”. It runs with the text as typed.`}</Text> : null}
           {options.length
             ? (
